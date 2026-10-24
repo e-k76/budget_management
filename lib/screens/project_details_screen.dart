@@ -24,6 +24,7 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
   List<Expense> _expenses = [];
   List<Income> _incomes = [];
   bool _loaded = false;
+  int _seenRevision = -1;
 
   Project _project(AppState s) => s.projects.firstWhere((p) => p.id == widget.projectId);
 
@@ -74,6 +75,11 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final p = _project(s);
+    if (s.revision != _seenRevision) {
+      // data changed (here or on another PC): re-query this project's rows
+      _seenRevision = s.revision;
+      WidgetsBinding.instance.addPostFrameCallback((_) => mounted ? _load() : null);
+    }
     return Scaffold(
       appBar: AppBar(title: Text('کارتابل پروژه: ${p.name}'), actions: [
         if (s.isAdmin) TextButton.icon(onPressed: () => _editBudget(p), icon: const Icon(Icons.percent), label: Text('بودجه ${Fmt.percent(p.budgetPercentage)}')),
@@ -228,12 +234,13 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
                       DataCell(Text(_expenses[i].approvedBy ?? '—')),
                       DataCell(Row(children: [
                         if (s.canEdit) IconButton(tooltip: 'ویرایش', icon: const Icon(Icons.edit_outlined), onPressed: () => _open(ExpenseFormScreen(expense: _expenses[i]))),
-                        if (s.isAdmin)
+                        if (s.canEdit)
                           IconButton(
                             tooltip: 'حذف',
                             icon: const Icon(Icons.delete_outline, color: Colors.red),
                             onPressed: () async {
-                              if (await confirm(context, 'این هزینه حذف شود؟')) await _run(() => s.deleteExpense(_expenses[i].id!));
+                              final id = _expenses[i].id!; // capture: list may refresh while the dialog is open
+                              if (await confirm(context, 'این هزینه حذف شود؟')) await _run(() => s.deleteExpense(id));
                             },
                           ),
                       ])),

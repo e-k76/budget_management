@@ -42,12 +42,36 @@ void main() {
     expect(e2.approvedBy, 'مدیر سیستم');
     expect(s.projects.single.remaining, 750000);
 
-    // viewer cannot write
+    // manager may delete an expense; viewer may not
+    await s.createUser('m', 'secret1', 'Manager', 'manager');
     await s.createUser('v', 'secret1', 'Viewer', 'viewer');
+    s.logout();
+    expect(await s.login('m', 'secret1'), isTrue);
+    await s.saveExpense(const Expense(projectName: 'پروژه الف', date: '1404/01/13', amount: 1, description: 'del'));
+    final del = (await s.expensesOf('پروژه الف')).firstWhere((x) => x.description == 'del');
+    await s.deleteExpense(del.id!);
+    expect((await s.expensesOf('پروژه الف')).any((x) => x.id == del.id), isFalse);
+    expect(() => s.deleteIncome(1), throwsStateError); // income delete stays admin-only
+
     s.logout();
     expect(await s.login('v', 'secret1'), isTrue);
     expect(() => s.addIncome('پروژه الف', 1, '1404/01/01'), throwsStateError);
     expect(() => s.deleteExpense(e.id!), throwsStateError);
+  });
+
+  test('live sync: change made elsewhere shows up without user action', () async {
+    final a = AppState(); // "this PC"
+    await a.login('admin', 'admin123');
+    final before = a.projects.length;
+    final v0 = await DatabaseService.instance.dataVersion();
+
+    // "another PC" writes straight to the shared DB
+    await DatabaseService.instance.addProject('پروژه ب');
+    expect(await DatabaseService.instance.dataVersion(), greaterThan(v0));
+
+    await Future<void>.delayed(const Duration(seconds: 5)); // poll interval is 2s
+    expect(a.projects.length, before + 1);
+    a.logout();
   });
 
   test('PDF report builds', () async {

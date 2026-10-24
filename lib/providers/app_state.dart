@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../models/app_user.dart';
@@ -32,17 +34,52 @@ class AppState extends ChangeNotifier {
     if (u == null) return false;
     user = u;
     await refresh();
+    _startPolling();
     return true;
   }
 
+  /// Bumped on every reload so open screens (e.g. project details) re-query.
+  int revision = 0;
+  Timer? _poller;
+  int? _seenVersion;
+  bool _polling = false;
+
+  /// Live sync: poll the DB's change counter; reload when another PC (or we) changed data.
+  void _startPolling() {
+    _poller?.cancel();
+    _poller = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (_polling || user == null) return;
+      _polling = true;
+      try {
+        final v = await db.dataVersion();
+        if (_seenVersion != null && v != _seenVersion) await refresh();
+        _seenVersion = v;
+      } catch (_) {
+        // transient lock / share hiccup: try again on the next tick
+      } finally {
+        _polling = false;
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _poller?.cancel();
+    super.dispose();
+  }
+
   void logout() {
+    _poller?.cancel();
+    _seenVersion = null;
     user = null;
     projects = [];
     notifyListeners();
   }
 
   Future<void> refresh() async {
+    _seenVersion = await db.dataVersion();
     projects = await db.projects();
+    revision++;
     notifyListeners();
   }
 
@@ -60,7 +97,7 @@ class AppState extends ChangeNotifier {
   // Expenses
   Future<void> saveExpense(Expense e) =>
       _write(canEdit, () => e.id == null ? db.addExpense(e, _who) : db.updateExpense(e));
-  Future<void> deleteExpense(int id) => _write(isAdmin, () => db.deleteExpense(id));
+  Future<void> deleteExpense(int id) => _write(canEdit, () => db.deleteExpense(id));
   Future<void> setApproval(int id, bool v) => _write(canEdit, () => db.setApproval(id, v, _who));
   Future<List<Expense>> expensesOf(String project) => db.expenses(project);
 

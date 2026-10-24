@@ -89,7 +89,25 @@ class DatabaseService {
     for (final s in ddl) {
       await db.execute(s);
     }
+    await _createSyncTriggers(db);
   }
+
+  /// Live sync: every insert/update/delete on any table bumps `sync_state.version`
+  /// (inside the same transaction as the change). Other PCs poll this single row
+  /// and reload when it changes.
+  Future<void> _createSyncTriggers(Database db) async {
+    await db.execute('CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
+    await db.execute('INSERT OR IGNORE INTO sync_state (id, version) VALUES (1, 0)');
+    for (final t in ['users', 'projects', 'expenses', 'incomes']) {
+      for (final op in ['INSERT', 'UPDATE', 'DELETE']) {
+        await db.execute('CREATE TRIGGER IF NOT EXISTS trg_sync_${t}_${op.toLowerCase()} '
+            'AFTER $op ON $t BEGIN UPDATE sync_state SET version = version + 1 WHERE id = 1; END');
+      }
+    }
+  }
+
+  Future<int> dataVersion() async =>
+      (await (await db).rawQuery('SELECT version FROM sync_state WHERE id = 1')).first['version'] as int;
 
   Future<void> _seedAdmin(Database db) async {
     final c = (await db.rawQuery('SELECT COUNT(*) AS c FROM users')).first['c'] as int;
