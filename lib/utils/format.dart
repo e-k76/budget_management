@@ -21,19 +21,17 @@ class Fmt {
   static Jalali? parseJalali(String s) {
     final m = RegExp(r'^(\d{4})/(\d{1,2})/(\d{1,2})$').firstMatch(_latinDigits(s.trim()));
     if (m == null) return null;
-    try {
-      final j = Jalali(int.parse(m[1]!), int.parse(m[2]!), int.parse(m[3]!));
-      return j.isValid() ? j : null;
-    } catch (_) {
-      return null;
-    }
+    final y = int.parse(m[1]!), mo = int.parse(m[2]!), d = int.parse(m[3]!);
+    if (y < 1 || mo < 1 || mo > 12 || d < 1) return null;
+    final j = Jalali(y, mo, d);
+    return d <= j.monthLength ? j : null;
   }
 
   static String _latinDigits(String s) {
     const fa = '۰۱۲۳۴۵۶۷۸۹', ar = '٠١٢٣٤٥٦٧٨٩';
     final b = StringBuffer();
     for (final c in s.split('')) {
-      final i = fa.indexOf(c) >= 0 ? fa.indexOf(c) : ar.indexOf(c);
+      final i = fa.contains(c) ? fa.indexOf(c) : ar.indexOf(c);
       b.write(i >= 0 ? '$i' : c);
     }
     return b.toString();

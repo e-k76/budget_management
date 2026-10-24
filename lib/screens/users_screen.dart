@@ -36,7 +36,7 @@ class _UsersScreenState extends State<UsersScreen> {
                 TextFormField(controller: p, obscureText: true, decoration: const InputDecoration(labelText: 'رمز عبور'), validator: (v) => (v ?? '').length < 6 ? 'حداقل ۶ کاراکتر' : null),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  value: role,
+                  initialValue: role,
                   decoration: const InputDecoration(labelText: 'نقش'),
                   items: [for (final e in AppUser.roleLabels.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
                   onChanged: (v) => set(() => role = v!),
@@ -85,8 +85,13 @@ class _UsersScreenState extends State<UsersScreen> {
                           icon: const Icon(Icons.delete_outline, color: Colors.red),
                           onPressed: () async {
                             if (!await confirm(context, 'کاربر «${u.fullName}» حذف شود؟')) return;
-                            await context.read<AppState>().deleteUser(u.id!);
-                            _reload();
+                            if (!context.mounted) return;
+                            try {
+                              await context.read<AppState>().deleteUser(u.id!);
+                              _reload();
+                            } catch (e) {
+                              if (context.mounted) toast(context, errText(e), error: true);
+                            }
                           },
                         ),
                 ),

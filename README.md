@@ -16,7 +16,7 @@ lib/
 
 ## Setup
 1. Install Flutter (>= 3.27) with Windows desktop support + Visual Studio "Desktop development with C++".
-2. Put the real fonts in `assets/fonts/` (`Vazirmatn-Regular.ttf`, `Vazirmatn-Bold.ttf`) — see the README there.
+2. Vazirmatn fonts (SIL OFL, see `assets/fonts/OFL.txt`) are bundled in `assets/fonts/`.
 3. The Windows runner is already in `windows/`:
    ```
    flutter pub get

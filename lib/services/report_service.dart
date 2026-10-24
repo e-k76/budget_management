@@ -23,9 +23,8 @@ class ReportService {
     pw.Widget cell(int i, String t, {bool head = false, PdfColor? color, PdfColor? bg}) => pw.Expanded(
           flex: flex[i],
           child: pw.Container(
-            color: bg,
             padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-            decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey400, width: .5)),
+            decoration: pw.BoxDecoration(color: bg, border: pw.Border.all(color: PdfColors.grey400, width: .5)),
             child: pw.Text(t,
                 textDirection: i == 1 ? rtl : pw.TextDirection.ltr,
                 textAlign: i == 1 ? pw.TextAlign.right : pw.TextAlign.center,
@@ -34,7 +33,6 @@ class ReportService {
         );
 
     pw.Widget row(List<String> v, {bool head = false, PdfColor? bg, PdfColor? balanceColor}) => pw.Row(
-          textDirection: rtl,
           children: [for (var i = 0; i < v.length; i++) cell(i, v[i], head: head, bg: bg, color: i == 6 ? balanceColor : null)],
         );
 
@@ -47,15 +45,15 @@ class ReportService {
       margin: const pw.EdgeInsets.all(28),
       textDirection: rtl,
       header: (_) => pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-        pw.Row(textDirection: rtl, mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-          pw.Text(companyName, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+        pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+          pw.Text(companyName, style: const pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
           pw.Text('تاریخ: ${Fmt.today()}'),
         ]),
         pw.SizedBox(height: 4),
-        pw.Text('گزارش مالی کلیه پروژه‌ها', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+        pw.Text('گزارش مالی کلیه پروژه‌ها', style: const pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
         pw.Divider(),
       ]),
-      footer: (c) => pw.Row(textDirection: rtl, mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+      footer: (c) => pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
         pw.Text('چاپ‌کننده: $printedBy', style: const pw.TextStyle(fontSize: 9)),
         pw.Text('صفحه ${c.pageNumber} از ${c.pagesCount}', style: const pw.TextStyle(fontSize: 9)),
       ]),

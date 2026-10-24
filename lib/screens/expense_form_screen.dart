@@ -70,7 +70,7 @@ class _ExpenseFormScreenState extends State<ExpenseFormScreen> {
                   key: _key,
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
                     DropdownButtonFormField<String>(
-                      value: projects.any((p) => p.name == _project) ? _project : null,
+                      initialValue: projects.any((p) => p.name == _project) ? _project : null,
                       decoration: const InputDecoration(labelText: 'نام پروژه'),
                       items: [for (final p in projects) DropdownMenuItem(value: p.name, child: Text(p.name))],
                       onChanged: (v) => setState(() => _project = v),

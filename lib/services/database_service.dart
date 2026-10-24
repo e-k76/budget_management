@@ -17,6 +17,9 @@ class DatabaseService {
   static final String dbPath =
       '${Platform.environment['USERPROFILE']}\\Desktop\\project_manage\\projects.db';
 
+  /// Tests point the service at a temp file instead of the Desktop share.
+  static String? pathOverride;
+
   Database? _db;
 
   Future<Database> get db async => _db ??= await _open();
@@ -24,9 +27,10 @@ class DatabaseService {
   Future<Database> _open() async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
-    await Directory(File(dbPath).parent.path).create(recursive: true);
+    final path = pathOverride ?? dbPath;
+    await Directory(File(path).parent.path).create(recursive: true);
     return databaseFactory.openDatabase(
-      dbPath,
+      path,
       options: OpenDatabaseOptions(
         onConfigure: (db) async {
           await db.rawQuery('PRAGMA busy_timeout = 5000;');

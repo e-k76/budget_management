@@ -87,4 +87,8 @@ class AppState extends ChangeNotifier {
     _require(isAdmin && id != user?.id);
     return db.deleteUser(id);
   }
+
+  @visibleForTesting
+  Future<void> saveExpenseForTest() => saveExpense(const Expense(
+      projectName: 'پروژه الف', date: '1404/01/12', amount: 500000, percentage: 10, description: 'تست'));
 }
