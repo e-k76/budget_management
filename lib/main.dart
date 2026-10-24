@@ -6,6 +6,7 @@ import 'providers/app_state.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/login_screen.dart';
 import 'theme.dart';
+import 'widgets/sync_banner.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +30,10 @@ class App extends StatelessWidget {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      builder: (c, child) => Directionality(textDirection: TextDirection.rtl, child: child!),
+      builder: (c, child) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Column(children: [const SyncBanner(), Expanded(child: child!)]),
+      ),
       home: loggedIn ? const DashboardScreen() : const LoginScreen(),
     );
   }

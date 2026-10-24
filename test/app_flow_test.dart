@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:budget_management/models/expense.dart';
 import 'package:budget_management/providers/app_state.dart';
 import 'package:budget_management/services/database_service.dart';
+import 'package:budget_management/services/pending_queue.dart';
 import 'package:budget_management/services/report_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -13,6 +14,7 @@ void main() {
   setUpAll(() {
     tmp = Directory.systemTemp.createTempSync('bm_test');
     DatabaseService.pathOverride = '${tmp.path}/projects.db';
+    PendingQueue.pathOverride = '${tmp.path}/pending.json';
   });
   tearDownAll(() => tmp.deleteSync(recursive: true));
 
@@ -22,7 +24,8 @@ void main() {
     expect(await s.login('admin', 'admin123'), isTrue);
 
     await s.addProject('پروژه الف');
-    expect(() => s.addProject('پروژه الف'), throwsA(anything)); // UNIQUE
+    await expectLater(s.addProject('پروژه الف'), throwsA(anything)); // UNIQUE: rejected, not queued
+    expect(s.pendingCount, 0);
     await s.addIncome('پروژه الف', 1000000, '1404/01/10');
     await s.addIncome('پروژه الف', 500000, '1404/02/10');
     expect(s.projects.single.totalIncome, 1500000);
@@ -66,12 +69,49 @@ void main() {
     final v0 = await DatabaseService.instance.dataVersion();
 
     // "another PC" writes straight to the shared DB
-    await DatabaseService.instance.addProject('پروژه ب');
+    await DatabaseService.instance.apply(PendingOp.create('addProject', {'name': 'پروژه ب'}));
     expect(await DatabaseService.instance.dataVersion(), greaterThan(v0));
 
     await Future<void>.delayed(const Duration(seconds: 3)); // poll interval is 1s
     expect(a.projects.length, before + 1);
     a.logout();
+  });
+
+  test('save-and-retry: offline change is queued, persisted, then sent automatically', () async {
+    final db = DatabaseService.instance;
+    final s = AppState();
+    await s.login('admin', 'admin123');
+    final good = DatabaseService.pathOverride;
+
+    // make the "share" unreachable: parent of the db path is a regular file
+    final blocker = File('${tmp.path}/blocker')..writeAsStringSync('x');
+    DatabaseService.pathOverride = '${blocker.path}/projects.db';
+    await db.reset();
+
+    await s.addIncome('پروژه الف', 7, '1404/03/01'); // must NOT throw
+    expect(s.online, isFalse);
+    expect(s.pendingCount, 1);
+    // survives an app restart: a fresh queue reads it back from the local file
+    final reloaded = PendingQueue();
+    await reloaded.load();
+    expect(reloaded.length, 1);
+    expect(reloaded.ops.single.type, 'addIncome');
+
+    // share comes back: the 1s poller flushes the queue on its own
+    DatabaseService.pathOverride = good;
+    await Future<void>.delayed(const Duration(seconds: 4));
+    expect(s.pendingCount, 0);
+    expect(s.online, isTrue);
+    expect((await s.incomesOf('پروژه الف')).where((i) => i.amount == 7), hasLength(1));
+    s.logout();
+  });
+
+  test('replaying the same queued write twice applies it once', () async {
+    final db = DatabaseService.instance;
+    final op = PendingOp.create('addIncome', {'project': 'پروژه الف', 'amount': 11.0, 'date': '1404/03/02', 'user': 'x'});
+    await db.apply(op);
+    await db.apply(op); // e.g. commit reached the share but the ack was lost, then retried
+    expect((await db.incomes('پروژه الف')).where((i) => i.amount == 11), hasLength(1));
   });
 
   test('PDF report builds', () async {

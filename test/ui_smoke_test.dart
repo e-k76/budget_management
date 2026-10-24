@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:budget_management/main.dart';
 import 'package:budget_management/providers/app_state.dart';
 import 'package:budget_management/services/database_service.dart';
+import 'package:budget_management/services/pending_queue.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -19,6 +20,7 @@ void main() {
   testWidgets('login -> dashboard -> project -> forms -> scratchpad render without errors', (t) async {
     final tmp = Directory.systemTemp.createTempSync('bm_ui');
     DatabaseService.pathOverride = '${tmp.path}/projects.db';
+    PendingQueue.pathOverride = '${tmp.path}/pending.json';
     t.view.physicalSize = const Size(1600, 1000);
     t.view.devicePixelRatio = 1;
     addTearDown(t.view.reset);

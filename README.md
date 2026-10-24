@@ -35,6 +35,15 @@ On open: `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = DELETE; PRAGMA synch
 - Dates are stored as `yyyy/mm/dd` Jalali text; the picker is the Material (Gregorian) picker converted to Jalali.
 - Passwords are salted SHA-256 (no network exposure, offline); swap for PBKDF2/Argon2 if you need stronger.
 
+## Offline save-and-retry
+Every income/expense/approval/project change is first written to a local queue
+(`%LOCALAPPDATA%\budget_management\pending_ops.json`) and then sent to the shared DB. If the share is
+unreachable the change stays queued (it survives closing the app), an orange banner shows how many are waiting, and the
+app resends them in order automatically once the share is back. Each queued write carries a unique id recorded in
+`applied_ops`, so a retry never applies a change twice. Changes the server rejects on replay (e.g. editing an income
+another PC deleted) are dropped with a red notice. Not queued (need a live connection): user management and project
+budget %. You must be able to reach the DB once to log in.
+
 ## Build the portable bundle
 ```
 flutter build windows --release

@@ -7,6 +7,7 @@ import '../models/expense.dart';
 import '../models/income.dart';
 import '../models/project.dart';
 import 'auth_service.dart';
+import 'pending_queue.dart';
 
 /// Single SQLite file on the DFS share. Rollback-journal (DELETE) mode + busy_timeout for multi-client access.
 /// Every write is a short, atomic transaction.
@@ -23,6 +24,15 @@ class DatabaseService {
   static String? pathOverride;
 
   Database? _db;
+
+  /// Drop the connection (e.g. after the share went away) so the next call reopens it.
+  Future<void> reset() async {
+    final d = _db;
+    _db = null;
+    try {
+      await d?.close();
+    } catch (_) {}
+  }
 
   Future<Database> get db async => _db ??= await _open();
 
@@ -90,6 +100,8 @@ class DatabaseService {
         created_by TEXT,
         created_at TEXT
       )''',
+      // Ids of queued writes already applied, so replays after a network drop are idempotent.
+      'CREATE TABLE IF NOT EXISTS applied_ops (op_id TEXT PRIMARY KEY, applied_at TEXT)',
       'CREATE INDEX IF NOT EXISTS idx_expenses_project ON expenses(project_name)',
       'CREATE INDEX IF NOT EXISTS idx_incomes_project ON incomes(project_name)',
     ];
@@ -97,6 +109,7 @@ class DatabaseService {
       await db.execute(s);
     }
     await _createSyncTriggers(db);
+    await db.execute("DELETE FROM applied_ops WHERE applied_at < ?", [DateTime.now().subtract(const Duration(days: 30)).toIso8601String()]);
   }
 
   /// Live sync: every insert/update/delete on any table bumps `sync_state.version`
@@ -159,9 +172,6 @@ class DatabaseService {
     return rows.map(Project.fromMap).toList();
   }
 
-  Future<void> addProject(String name) async =>
-      (await db).insert('projects', {'name': name.trim(), 'created_at': _now()});
-
   Future<void> setBudgetPercentage(int id, double pct) async =>
       (await db).update('projects', {'budget_percentage': pct}, where: 'id = ?', whereArgs: [id]);
 
@@ -171,76 +181,81 @@ class DatabaseService {
       .map(Expense.fromMap)
       .toList();
 
-  Future<void> addExpense(Expense e, String user) async => (await db).insert('expenses', {
-        'project_name': e.projectName,
-        'date': e.date,
-        'amount': e.amount,
-        'percentage': e.percentage,
-        'description': e.description,
-        'is_approved': 0,
-        'created_by': user,
-        'created_at': _now(),
-      });
-
-  Future<void> updateExpense(Expense e) async => (await db).update(
-        'expenses',
-        {
-          'date': e.date,
-          'amount': e.amount,
-          'percentage': e.percentage,
-          'description': e.description,
-          'project_name': e.projectName,
-        },
-        where: 'id = ?',
-        whereArgs: [e.id],
-      );
-
-  Future<void> deleteExpense(int id) async => (await db).delete('expenses', where: 'id = ?', whereArgs: [id]);
-
-  Future<void> setApproval(int id, bool approved, String user) async => (await db).update(
-        'expenses',
-        {'is_approved': approved ? 1 : 0, 'approved_by': approved ? user : null},
-        where: 'id = ?',
-        whereArgs: [id],
-      );
-
   // ---------------- Incomes ----------------
   Future<List<Income>> incomes(String projectName) async => (await (await db).query('incomes',
           where: 'project_name = ?', whereArgs: [projectName], orderBy: 'id DESC'))
       .map(Income.fromMap)
       .toList();
 
-  /// total_income = total_income + amount, atomically with the ledger row.
-  Future<void> addIncome(String projectName, double amount, String date, String user) async {
+  // ---------------- Writes (queued, idempotent) ----------------
+  /// Applies one queued write in a single short transaction. If its id was already applied
+  /// (e.g. the commit reached the share but the confirmation was lost) it is a no-op.
+  Future<void> apply(PendingOp op) async {
     await (await db).transaction((t) async {
-      await t.insert('incomes', {
-        'project_name': projectName,
-        'amount': amount,
-        'date': date,
-        'created_by': user,
-        'created_at': _now(),
-      });
-      await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?',
-          [amount, projectName]);
+      if ((await t.rawQuery('SELECT 1 FROM applied_ops WHERE op_id = ?', [op.id])).isNotEmpty) return;
+      await t.insert('applied_ops', {'op_id': op.id, 'applied_at': _now()});
+      final d = op.data;
+      switch (op.type) {
+        case 'addProject':
+          await t.insert('projects', {'name': (d['name'] as String).trim(), 'created_at': op.at});
+        case 'addExpense':
+          await t.insert('expenses', {
+            'project_name': d['project'],
+            'date': d['date'],
+            'amount': d['amount'],
+            'percentage': d['percentage'],
+            'description': d['description'],
+            'is_approved': 0,
+            'created_by': d['user'],
+            'created_at': op.at,
+          });
+        case 'updateExpense':
+          await t.update(
+              'expenses',
+              {
+                'project_name': d['project'],
+                'date': d['date'],
+                'amount': d['amount'],
+                'percentage': d['percentage'],
+                'description': d['description'],
+              },
+              where: 'id = ?',
+              whereArgs: [d['id']]);
+        case 'deleteExpense':
+          await t.delete('expenses', where: 'id = ?', whereArgs: [d['id']]);
+        case 'setApproval':
+          final ok = d['approved'] == true;
+          await t.update('expenses', {'is_approved': ok ? 1 : 0, 'approved_by': ok ? d['user'] : null},
+              where: 'id = ?', whereArgs: [d['id']]);
+        case 'addIncome':
+          // total_income = total_income + amount, atomically with the ledger row
+          await t.insert('incomes', {
+            'project_name': d['project'],
+            'amount': d['amount'],
+            'date': d['date'],
+            'created_by': d['user'],
+            'created_at': op.at,
+          });
+          await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?',
+              [d['amount'], d['project']]);
+        case 'updateIncome':
+          final old = await _incomeRow(t, d['id']);
+          final diff = (d['amount'] as num).toDouble() - (old['amount'] as num).toDouble();
+          await t.update('incomes', {'amount': d['amount'], 'date': d['date']}, where: 'id = ?', whereArgs: [d['id']]);
+          await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?', [diff, old['project_name']]);
+        case 'deleteIncome':
+          final old = await _incomeRow(t, d['id']);
+          await t.delete('incomes', where: 'id = ?', whereArgs: [d['id']]);
+          await t.rawUpdate('UPDATE projects SET total_income = total_income - ? WHERE name = ?', [old['amount'], old['project_name']]);
+        default:
+          throw StateError('عملیات ناشناخته: ${op.type}');
+      }
     });
   }
 
-  Future<void> updateIncome(int id, double newAmount, String date) async {
-    await (await db).transaction((t) async {
-      final old = (await t.query('incomes', where: 'id = ?', whereArgs: [id])).first;
-      final diff = newAmount - (old['amount'] as num).toDouble();
-      await t.update('incomes', {'amount': newAmount, 'date': date}, where: 'id = ?', whereArgs: [id]);
-      await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?',
-          [diff, old['project_name']]);
-    });
-  }
-
-  Future<void> deleteIncome(int id) async {
-    await (await db).transaction((t) async {
-      final old = (await t.query('incomes', where: 'id = ?', whereArgs: [id])).first;
-      await t.delete('incomes', where: 'id = ?', whereArgs: [id]);
-      await t.rawUpdate('UPDATE projects SET total_income = total_income - ? WHERE name = ?',
-          [old['amount'], old['project_name']]);
-    });
+  Future<Map<String, Object?>> _incomeRow(DatabaseExecutor t, Object? id) async {
+    final r = await t.query('incomes', where: 'id = ?', whereArgs: [id]);
+    if (r.isEmpty) throw StateError('این درآمد دیگر وجود ندارد (احتمالاً در رایانه دیگری حذف شده است)');
+    return r.first;
   }
 }

@@ -31,7 +31,14 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
   Future<void> _load() async {
     final s = context.read<AppState>();
     final name = _project(s).name;
-    final e = await s.expensesOf(name), i = await s.incomesOf(name);
+    final List<Expense> e;
+    final List<Income> i;
+    try {
+      e = await s.expensesOf(name);
+      i = await s.incomesOf(name);
+    } catch (_) {
+      return; // share unreachable: keep showing what we have; reloads when data refreshes
+    }
     if (mounted) setState(() { _expenses = e; _incomes = i; _loaded = true; });
   }
 
