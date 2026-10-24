@@ -1,40 +1,53 @@
-# مدیریت مالی پروژه‌ها (Budget Management)
+# مدیریت مالی پروژه‌ها — Flutter Desktop (Windows, offline)
 
-Offline Flutter Windows desktop app (Persian RTL, Dana font). SQLite via `sqflite_common_ffi`;
-no web server, no network ports.
+Persian RTL financial & project management app. SQLite (WAL) on a shared path, no web server, no network ports.
 
-* Database: shared file on the DFS server; the path is `AppConfig.dbPath` in `lib/core/app_config.dart` (created on first run; WAL + `busy_timeout=5000`).
-* First login: `admin` / `admin123` — change it from the Users screen.
-* Roles: **admin** (everything), **manager** (add/edit income & expenses, approve, print), **viewer** (read-only).
-* `incomes` is an extra table (beyond the given schema) so income entries can be listed/edited/deleted; `projects.total_income` is kept in sync in the same transaction.
-
-## Layout
-`lib/core` config, theme, formatters, calculator engine · `lib/models` · `lib/services` (database, auth, PDF report) ·
-`lib/providers` (app state) · `lib/screens` · `lib/widgets`.
-
-## Build (Windows)
-Requires Windows **Developer Mode** (plugins need symlinks): `start ms-settings:developers`.
+## Structure
 ```
-flutter pub get
-flutter test
+lib/
+  main.dart, theme.dart
+  models/      app_user, project, expense, income
+  services/    database_service (schema, PRAGMAs, transactions), auth_service (salted SHA-256), report_service (A4 landscape PDF)
+  providers/   app_state (session, RBAC guards, cached dashboard totals)
+  screens/     login, dashboard, project_details (fl_chart), expense_form, income_form, users, scratchpad
+  widgets/     kpi_card, currency_field (live #,##0), jalali_field, ui helpers
+  utils/       format (money, Jalali), calc (safe expression parser)
+```
+
+## Setup
+1. Install Flutter (>= 3.27) with Windows desktop support + Visual Studio "Desktop development with C++".
+2. Put the real fonts in `assets/fonts/` (`Vazirmatn-Regular.ttf`, `Vazirmatn-Bold.ttf`) — see the README there.
+3. The Windows runner is already in `windows/`:
+   ```
+   flutter pub get
+   flutter test
+   flutter run -d windows
+   ```
+4. First login: `admin` / `admin123` — change it (create a new admin, delete the default one).
+
+Database path: `%USERPROFILE%\Desktop\project_manage\projects.db` (folder auto-created).
+On open: `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;`.
+
+## Notes / deviations from the brief
+- Added an `incomes` table (ledger) so income items can be listed/edited/deleted; `projects.total_income` is still maintained additively, inside the same transaction.
+- Permissions: admin = everything; manager = add/edit income & expenses + approval toggle; viewer = read-only + scratchpad. Deleting and project creation are admin-only. Enforced in `AppState`, not just by hiding buttons.
+- "مانده هزینه" = income − expenses. "تراز" = income × budget% / 100 − expenses. Budget % is editable by admin on the project page.
+- Dates are stored as `yyyy/mm/dd` Jalali text; the picker is the Material (Gregorian) picker converted to Jalali.
+- SQLite over SMB/DFS is only as safe as the share's locking. WAL needs shared memory (`-shm`), which is **not reliable across network shares**; if you see "database is locked"/corruption with many simultaneous clients, switch to `journal_mode = DELETE` in `database_service.dart`.
+- Passwords are salted SHA-256 (no network exposure, offline); swap for PBKDF2/Argon2 if you need stronger.
+
+## Build the portable bundle
+```
 flutter build windows --release
 ```
-Portable bundle: copy the whole `build\windows\x64\runner\Release\` folder; run `budget_management.exe`. No installer needed.
+Copy the whole folder `build\windows\x64\runner\Release\` (exe + `flutter_windows.dll` + `data\` + plugin DLLs, including `sqlite3.dll`) to the target PCs. Run `budget_management.exe` — no installer.
 
 ## Git
 ```
-git init
+cd budget_management
+git init -b main
 git add .
-git commit -m "Initial commit: budget management desktop app"
-git branch -M main
-git remote add origin https://github.com/<user>/<repo>.git
+git commit -m "Initial commit: Flutter desktop financial & project management app"
+git remote add origin https://github.com/<you>/<repo>.git
 git push -u origin main
 ```
-
-## Two databases (offline-first)
-* **Local** `Desktop\project_manage\projects.db` is always written and is the only copy used when the share is unreachable.
-* **Share** the `projects.db` on the DFS server (see `AppConfig.remoteDbPath`) is written too whenever it is reachable, and is what the app reads from while connected.
-* Changes made while the share is unreachable are saved locally and queued (`pending_ops`). The app checks every 10 s; when the share is back it replays the queue in order, then pulls the share's current data into the local copy. The sidebar badge shows the state; click it to retry.
-* First connection to a share that has no projects/expenses/incomes publishes this machine's data (users included). If the share already has data it wins, and the local file is first copied to `projects.db.pre-sync-<time>`.
-* Expenses and incomes carry a unique `uid` so rows can be matched across the two files.
-* `tool/import_access.dart` only touches the local file; the app pushes it to an empty share on the next sync.

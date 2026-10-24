@@ -1,24 +1,21 @@
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../core/app_theme.dart';
-import '../core/formatters.dart';
-import '../core/search.dart';
-import '../models/models.dart';
+import '../models/expense.dart';
+import '../models/income.dart';
+import '../models/project.dart';
 import '../providers/app_state.dart';
-import '../services/auth_service.dart';
-import '../widgets/charts.dart';
+import '../theme.dart';
+import '../utils/format.dart';
 import '../widgets/kpi_card.dart';
-import '../widgets/status_icons.dart';
-import '../widgets/temp_sum.dart';
-import '../widgets/ui_helpers.dart';
-import 'entry_dialogs.dart';
+import '../widgets/ui.dart';
+import 'expense_form_screen.dart';
+import 'income_form_screen.dart';
 
 class ProjectDetailsScreen extends StatefulWidget {
-  const ProjectDetailsScreen({super.key, required this.projectName});
-
-  final String projectName;
-
+  const ProjectDetailsScreen({super.key, required this.projectId});
+  final int projectId;
   @override
   State<ProjectDetailsScreen> createState() => _ProjectDetailsScreenState();
 }
@@ -26,489 +23,254 @@ class ProjectDetailsScreen extends StatefulWidget {
 class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
   List<Expense> _expenses = [];
   List<Income> _incomes = [];
-  bool _loading = true;
-  final _expenseSearch = TextEditingController();
-  final _incomeSearch = TextEditingController();
+  bool _loaded = false;
 
-  // Expenses tab: approval filter and the amounts clicked into the temp sum.
-  ApprovalFilter _approval = ApprovalFilter.all;
-  final Set<String> _picked = {};
+  Project _project(AppState s) => s.projects.firstWhere((p) => p.id == widget.projectId);
+
+  Future<void> _load() async {
+    final s = context.read<AppState>();
+    final name = _project(s).name;
+    final e = await s.expensesOf(name), i = await s.incomesOf(name);
+    if (mounted) setState(() { _expenses = e; _incomes = i; _loaded = true; });
+  }
 
   @override
   void initState() {
     super.initState();
-    _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
-  @override
-  void dispose() {
-    _expenseSearch.dispose();
-    _incomeSearch.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    final state = context.read<AppState>();
+  Future<void> _run(Future<void> Function() op) async {
     try {
-      await state.refresh();
-      final e = await state.expensesOf(widget.projectName);
-      final i = await state.incomesOf(widget.projectName);
-      if (!mounted) return;
-      setState(() {
-        _expenses = e;
-        _incomes = i;
-        _loading = false;
-      });
-    } catch (err) {
-      if (mounted) {
-        setState(() => _loading = false);
-        showSnack(context, 'خطا در بارگذاری: $err', error: true);
-      }
-    }
-  }
-
-  Future<void> _guard(Future<void> Function() action) async {
-    try {
-      await action();
+      await op();
       await _load();
     } catch (e) {
-      if (mounted) showSnack(context, '$e', error: true);
+      if (mounted) toast(context, errText(e), error: true);
     }
   }
 
-  // ---------------------------------------------------------------- search
+  Future<void> _open(Widget w) async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => w));
+    await _load();
+  }
 
-  List<Expense> get _shownExpenses => _expenses
-      .where((e) => _approval.allows(e.isApproved) &&
-          matchesQuery([
-            e.payee,
-            e.description,
-            e.date,
-            e.approvedAt ?? '',
-            e.approvedBy ?? '',
-            e.createdBy ?? '',
-            e.amount.round().toString(),
-          ], _expenseSearch.text))
-      .toList();
-
-  List<Income> get _shownIncomes => _incomes
-      .where((i) => matchesQuery([
-            i.date,
-            i.createdBy ?? '',
-            i.amount.round().toString(),
-          ], _incomeSearch.text))
-      .toList();
-
-  Widget _searchBar(TextEditingController c, String hint, int shown, int total,
-      {List<Widget> extra = const []}) {
-    return Padding(
-      padding: const EdgeInsets.all(14),
-      child: Wrap(
-        spacing: 14,
-        runSpacing: 10,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          SizedBox(
-            width: 320,
-            child: TextField(
-              controller: c,
-              onChanged: (_) => setState(() {}),
-              decoration: InputDecoration(
-                hintText: hint,
-                prefixIcon: const Icon(Icons.search),
-                isDense: true,
-                suffixIcon: c.text.isEmpty
-                    ? null
-                    : IconButton(
-                        icon: const Icon(Icons.close_rounded, size: 18),
-                        onPressed: () => setState(c.clear),
-                      ),
-              ),
-            ),
-          ),
-          ...extra,
-          Text('$shown از $total',
-              style: TextStyle(color: Theme.of(context).hintColor)),
+  Future<void> _editBudget(Project p) async {
+    final c = TextEditingController(text: '${p.budgetPercentage}');
+    final v = await showDialog<double>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('درصد بودجه پروژه'),
+        content: TextField(controller: c, autofocus: true, textDirection: TextDirection.ltr, decoration: const InputDecoration(suffixText: '٪')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('انصراف')),
+          FilledButton(onPressed: () => Navigator.pop(context, double.tryParse(c.text)), child: const Text('ثبت')),
         ],
       ),
     );
+    if (v != null && v >= 0 && v <= 100) await _run(() => context.read<AppState>().setBudget(p, v));
   }
-
-  // ----------------------------------------------------------------- build
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final user = context.watch<AuthService>().currentUser!;
-    ProjectSummary? summary;
-    for (final s in state.summaries) {
-      if (s.name == widget.projectName) summary = s;
-    }
-
+    final s = context.watch<AppState>();
+    final p = _project(s);
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-        title: Text('کارتابل پروژه: ${widget.projectName}',
-            style: const TextStyle(fontWeight: FontWeight.w800)),
-        actions: [
-          IconButton(
-            tooltip: 'بروزرسانی',
-            onPressed: _load,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          const SizedBox(width: 8),
+      appBar: AppBar(title: Text('کارتابل پروژه: ${p.name}'), actions: [
+        if (s.isAdmin) TextButton.icon(onPressed: () => _editBudget(p), icon: const Icon(Icons.percent), label: Text('بودجه ${Fmt.percent(p.budgetPercentage)}')),
+        if (s.canEdit) ...[
+          TextButton.icon(onPressed: () => _open(ExpenseFormScreen(projectName: p.name)), icon: const Icon(Icons.request_quote_outlined), label: const Text('درخواست وجه')),
+          TextButton.icon(onPressed: () => _open(IncomeFormScreen(projectName: p.name)), icon: const Icon(Icons.add_card), label: const Text('افزایش درآمد')),
         ],
-      ),
-      body: _loading || summary == null
+        const SizedBox(width: 8),
+      ]),
+      body: !_loaded
           ? const Center(child: CircularProgressIndicator())
-          : LayoutBuilder(builder: (context, c) {
-              final s = summary!;
-              final pinned = <Widget>[
-                _actions(context, user, s),
-                const SizedBox(height: 16),
-                _kpis(s),
-                const SizedBox(height: 16),
-              ];
-              // Actions and KPIs stay pinned; only the tab content scrolls.
-              // On very short windows fall back to scrolling the whole page.
-              if (c.maxHeight < 600) {
-                return ListView(
-                  padding: const EdgeInsets.all(24),
-                  children: [
-                    ...pinned,
-                    SizedBox(height: 460, child: _tabs(state, user, s)),
-                  ],
-                );
-              }
-              return Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [...pinned, Expanded(child: _tabs(state, user, s))],
-                ),
-              );
-            }),
+          : ListView(padding: const EdgeInsets.all(24), children: [
+              LayoutBuilder(builder: (context, c) {
+                final cols = c.maxWidth > 1000 ? 4 : 2;
+                final w = (c.maxWidth - (cols - 1) * 16) / cols;
+                return Wrap(spacing: 16, runSpacing: 16, children: [
+                  SizedBox(width: w, child: KpiCard(title: 'درآمد کلی', value: p.totalIncome, icon: Icons.trending_up, color: kIncome)),
+                  SizedBox(width: w, child: KpiCard(title: 'هزینه کرد کلی', value: p.totalExpenses, icon: Icons.trending_down, color: kExpense)),
+                  SizedBox(width: w, child: KpiCard(title: 'مانده هزینه', value: p.remaining, icon: Icons.savings_outlined, color: kPrimary)),
+                  SizedBox(width: w, child: KpiCard(title: 'تراز (با درصد بودجه)', value: p.balance, icon: Icons.balance, color: Colors.teal)),
+                ]);
+              }),
+              const SizedBox(height: 20),
+              _charts(p),
+              const SizedBox(height: 20),
+              _expensesTable(s),
+              const SizedBox(height: 20),
+              _incomesTable(s),
+            ]),
     );
   }
 
-  Widget _tabs(AppState state, AppUser user, ProjectSummary s) {
-    return DefaultTabController(
-      length: 3,
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          children: [
-            const TabBar(
-              tabs: [
-                Tab(text: 'درخواست‌های وجه / هزینه‌ها'),
-                Tab(text: 'درآمدها'),
-                Tab(text: 'نمودارها'),
+  // ---------------- charts ----------------
+  Widget _charts(Project p) {
+    final months = <String>{
+      for (final e in _expenses) if (e.date.length >= 7) e.date.substring(0, 7),
+      for (final i in _incomes) if (i.date.length >= 7) i.date.substring(0, 7),
+    }.toList()..sort();
+    double sum<T>(Iterable<T> it, String m, String Function(T) d, double Function(T) a) =>
+        it.where((x) => d(x).startsWith(m)).fold(0.0, (t, x) => t + a(x));
+    final inc = [for (final m in months) sum<Income>(_incomes, m, (i) => i.date, (i) => i.amount)];
+    final exp = [for (final m in months) sum<Expense>(_expenses, m, (e) => e.date, (e) => e.amount)];
+    final maxY = [...inc, ...exp, p.totalIncome, p.totalExpenses, 1.0].reduce((a, b) => a > b ? a : b) * 1.15;
+
+    String short(double v) => v >= 1e9 ? '${(v / 1e9).toStringAsFixed(1)}B' : v >= 1e6 ? '${(v / 1e6).toStringAsFixed(1)}M' : v >= 1e3 ? '${(v / 1e3).toStringAsFixed(0)}K' : v.toStringAsFixed(0);
+    final axis = AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 52, getTitlesWidget: (v, m) => Text(short(v), style: const TextStyle(fontSize: 10))));
+    const none = AxisTitles(sideTitles: SideTitles(showTitles: false));
+
+    Widget legend(Color c, String t) => Row(mainAxisSize: MainAxisSize.min, children: [Container(width: 10, height: 10, decoration: BoxDecoration(color: c, shape: BoxShape.circle)), const SizedBox(width: 6), Text(t)]);
+
+    final bar = Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('درآمد در برابر هزینه', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 240,
+            child: BarChart(BarChartData(
+              maxY: maxY,
+              borderData: FlBorderData(show: false),
+              gridData: const FlGridData(drawVerticalLine: false),
+              titlesData: FlTitlesData(
+                leftTitles: axis, topTitles: none, rightTitles: none,
+                bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (v, m) => Padding(padding: const EdgeInsets.only(top: 6), child: Text(v == 0 ? 'درآمد' : 'هزینه')))),
+              ),
+              barGroups: [
+                BarChartGroupData(x: 0, barRods: [BarChartRodData(toY: p.totalIncome, color: kIncome, width: 44, borderRadius: BorderRadius.circular(8))]),
+                BarChartGroupData(x: 1, barRods: [BarChartRodData(toY: p.totalExpenses, color: kExpense, width: 44, borderRadius: BorderRadius.circular(8))]),
               ],
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: TabBarView(
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  _expensesTab(state, user),
-                  _incomesTab(state, user, s),
-                  ListView(
-                    padding: const EdgeInsets.all(18),
-                    children: [_charts(s)],
-                  ),
+              barTouchData: BarTouchData(touchTooltipData: BarTouchTooltipData(getTooltipItem: (g, gi, r, ri) => BarTooltipItem(Fmt.money(r.toY), const TextStyle(color: Colors.white, fontFamily: 'Vazirmatn')))),
+            )),
+          ),
+        ]),
+      ),
+    );
+
+    final line = Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [const Text('روند ماهانه', style: TextStyle(fontWeight: FontWeight.bold)), const Spacer(), legend(kIncome, 'درآمد'), const SizedBox(width: 12), legend(kExpense, 'هزینه')]),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 240,
+            child: months.isEmpty
+                ? const Center(child: Text('داده‌ای برای نمایش وجود ندارد'))
+                : LineChart(LineChartData(
+                    minY: 0, maxY: maxY, minX: 0, maxX: months.length == 1 ? 1 : (months.length - 1).toDouble(),
+                    borderData: FlBorderData(show: false),
+                    gridData: const FlGridData(drawVerticalLine: false),
+                    titlesData: FlTitlesData(
+                      leftTitles: axis, topTitles: none, rightTitles: none,
+                      bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, interval: 1, getTitlesWidget: (v, m) {
+                        final i = v.toInt();
+                        return (v != i || i >= months.length) ? const SizedBox() : Padding(padding: const EdgeInsets.only(top: 6), child: Text(months[i], style: const TextStyle(fontSize: 10)));
+                      })),
+                    ),
+                    lineBarsData: [
+                      for (final (data, color) in [(inc, kIncome), (exp, kExpense)])
+                        LineChartBarData(
+                          spots: [for (var i = 0; i < months.length; i++) FlSpot(i.toDouble(), data[i])],
+                          color: color, isCurved: true, barWidth: 3,
+                          belowBarData: BarAreaData(show: true, color: color.withValues(alpha: .08)),
+                        ),
+                    ],
+                  )),
+          ),
+        ]),
+      ),
+    );
+
+    return LayoutBuilder(builder: (c, box) => box.maxWidth > 900
+        ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(flex: 2, child: bar), const SizedBox(width: 16), Expanded(flex: 3, child: line)])
+        : Column(children: [bar, const SizedBox(height: 16), line]));
+  }
+
+  // ---------------- tables ----------------
+  Widget _section(String title, Widget child) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const SizedBox(height: 8),
+            LayoutBuilder(builder: (c, box) => SingleChildScrollView(scrollDirection: Axis.horizontal, child: ConstrainedBox(constraints: BoxConstraints(minWidth: box.maxWidth), child: child))),
+          ]),
+        ),
+      );
+
+  Widget _expensesTable(AppState s) => _section(
+        'هزینه‌ها / درخواست‌های وجه',
+        _expenses.isEmpty
+            ? const Padding(padding: EdgeInsets.all(24), child: Text('موردی ثبت نشده است'))
+            : DataTable(
+                columns: const [
+                  DataColumn(label: Text('ردیف')), DataColumn(label: Text('تاریخ')), DataColumn(label: Text('مبلغ'), numeric: true),
+                  DataColumn(label: Text('درصد')), DataColumn(label: Text('شرح')), DataColumn(label: Text('وضعیت تایید')),
+                  DataColumn(label: Text('تاییدکننده')), DataColumn(label: Text('عملیات')),
+                ],
+                rows: [
+                  for (var i = 0; i < _expenses.length; i++)
+                    DataRow(cells: [
+                      DataCell(Text('${i + 1}')),
+                      DataCell(Text(_expenses[i].date)),
+                      DataCell(Text(Fmt.number(_expenses[i].amount))),
+                      DataCell(Text(Fmt.percent(_expenses[i].percentage))),
+                      DataCell(ConstrainedBox(constraints: const BoxConstraints(maxWidth: 280), child: Text(_expenses[i].description, overflow: TextOverflow.ellipsis))),
+                      DataCell(Checkbox(
+                        value: _expenses[i].isApproved,
+                        onChanged: s.canEdit ? (v) => _run(() => s.setApproval(_expenses[i].id!, v ?? false)) : null,
+                      )),
+                      DataCell(Text(_expenses[i].approvedBy ?? '—')),
+                      DataCell(Row(children: [
+                        if (s.canEdit) IconButton(tooltip: 'ویرایش', icon: const Icon(Icons.edit_outlined), onPressed: () => _open(ExpenseFormScreen(expense: _expenses[i]))),
+                        if (s.isAdmin)
+                          IconButton(
+                            tooltip: 'حذف',
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () async {
+                              if (await confirm(context, 'این هزینه حذف شود؟')) await _run(() => s.deleteExpense(_expenses[i].id!));
+                            },
+                          ),
+                      ])),
+                    ]),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _actions(BuildContext context, AppUser user, ProjectSummary s) {
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        if (user.canEdit) ...[
-          FilledButton.tonalIcon(
-            onPressed: () async {
-              if (await showExpenseDialog(context, project: s.name)) _load();
-            },
-            icon: const Icon(Icons.request_quote_outlined),
-            label: const Text('افزودن درخواست وجه'),
-          ),
-          FilledButton.tonalIcon(
-            onPressed: () async {
-              if (await showIncomeDialog(context, project: s.name)) _load();
-            },
-            icon: const Icon(Icons.trending_up_rounded),
-            label: const Text('افزایش درآمد'),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _kpis(ProjectSummary s) {
-    final cards = [
-      KpiCard(
-          title: 'درآمد کلی',
-          value: formatMoney(s.income),
-          icon: Icons.south_west_rounded,
-          color: AppTheme.income),
-      KpiCard(
-          title: 'هزینه تاییدشده',
-          value: formatMoney(s.approvedExpenses),
-          iconWidget: const DocStatusIcon(approved: true),
-          color: DocStatusIcon.approvedColor),
-      KpiCard(
-          title: 'هزینه تاییدنشده',
-          value: formatMoney(s.totalExpenses - s.approvedExpenses),
-          iconWidget: const DocStatusIcon(approved: false),
-          color: DocStatusIcon.unapprovedColor),
-      KpiCard(
-          title: 'بودجه',
-          value: formatMoney(s.budgetedIncome),
-          icon: Icons.account_balance_wallet_outlined,
-          color: const Color(0xFF0EA5E9)),
-      KpiCard(
-          title: 'تراز با درصد بودجه',
-          value: formatMoney(s.balance),
-          icon: Icons.balance_rounded,
-          color: AppTheme.seed),
-    ];
-    return LayoutBuilder(builder: (context, c) {
-      final cols = c.maxWidth >= 1250
-          ? 5
-          : (c.maxWidth >= 900 ? 3 : (c.maxWidth >= 600 ? 2 : 1));
-      const gap = 14.0;
-      final w = (c.maxWidth - gap * (cols - 1)) / cols;
-      return Wrap(
-        spacing: gap,
-        runSpacing: gap,
-        children: [for (final k in cards) SizedBox(width: w, child: k)],
-      );
-    });
-  }
-
-  // ---------------------------------------------------------------- charts
-
-  Map<String, double> _monthly(Iterable<(String, double)> items) {
-    final m = <String, double>{};
-    for (final (date, amount) in items) {
-      m.update(monthKey(date), (v) => v + amount, ifAbsent: () => amount);
-    }
-    return m;
-  }
-
-  Widget _charts(ProjectSummary s) {
-    return ChartGrid(children: [
-      ChartCard(title: 'تفکیک درآمد و هزینه', child: ApprovalPie(s)),
-      ChartCard(
-        title: 'روند ماهانه درآمد و هزینه',
-        child: MonthlyTrendChart(
-          income: _monthly(_incomes.map((i) => (i.date, i.amount))),
-          expense: _monthly(_expenses.map((e) => (e.date, e.amount))),
-        ),
-      ),
-      ChartCard(
-          title: 'هزینه ماهانه تاییدشده و تاییدنشده',
-          child: MonthlyApprovalBars(_expenses)),
-      ChartCard(
-          title: 'بیشترین دریافت‌کنندگان', child: TopPayeesBars(_expenses)),
-    ]);
-  }
-
-  Widget _empty(String text) => Center(
-        child: Text(text, style: TextStyle(color: Theme.of(context).hintColor)),
       );
 
-  // ---------------------------------------------------------------- tables
-
-  Widget _rowActions({
-    required bool canEdit,
-    required bool canDelete,
-    required VoidCallback onEdit,
-    required VoidCallback onDelete,
-  }) {
-    final err = Theme.of(context).colorScheme.error;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (canEdit)
-          IconButton(
-            tooltip: 'ویرایش',
-            icon: const Icon(Icons.edit_outlined, size: 20),
-            onPressed: onEdit,
-          ),
-        if (canDelete)
-          IconButton(
-            tooltip: 'حذف',
-            icon: Icon(Icons.delete_outline, size: 20, color: err),
-            onPressed: onDelete,
-          ),
-      ],
-    );
-  }
-
-  Widget _expensesTab(AppState state, AppUser user) {
-    final list = _shownExpenses;
-    final pickedTotal = _expenses
-        .where((e) => _picked.contains(e.uid))
-        .fold<double>(0, (a, e) => a + e.amount);
-    final pickedCount = _expenses.where((e) => _picked.contains(e.uid)).length;
-    return Column(
-      children: [
-        _searchBar(
-          _expenseSearch,
-          'جستجو (در وجه، شرح، تاریخ، مبلغ)',
-          list.length,
-          _expenses.length,
-          extra: [
-            ApprovalFilterField(
-                value: _approval,
-                onChanged: (v) => setState(() => _approval = v)),
-          ],
-        ),
-        TempSumBar(
-          count: pickedCount,
-          total: pickedTotal,
-          onClear: () => setState(_picked.clear),
-        ),
-        Expanded(
-          child: _expenses.isEmpty
-              ? _empty('هزینه‌ای ثبت نشده است.')
-              : list.isEmpty
-                  ? _empty('موردی یافت نشد.')
-                  : _expensesTable(list, state, user),
-        ),
-      ],
-    );
-  }
-
-  Widget _expensesTable(List<Expense> list, AppState state, AppUser user) {
-    return PinnedTable(
-      columns: const [
-        PinnedColumn('ردیف', flex: 1, minWidth: 56),
-        PinnedColumn('تاریخ', flex: 2, minWidth: 110),
-        PinnedColumn('مبلغ', flex: 3, minWidth: 140),
-        PinnedColumn('در وجه', flex: 3, minWidth: 150),
-        PinnedColumn('شرح', flex: 4, minWidth: 200),
-        PinnedColumn('وضعیت تایید', flex: 2, minWidth: 110),
-        PinnedColumn('تاییدکننده', flex: 2, minWidth: 130),
-        PinnedColumn('تاریخ تایید', flex: 2, minWidth: 110),
-        PinnedColumn('عملیات', flex: 2, minWidth: 110),
-      ],
-      rows: [
-        for (var i = 0; i < list.length; i++)
-          [
-            Text('${i + 1}'),
-            Text(list[i].date),
-            PickableAmount(
-              amount: list[i].amount,
-              picked: _picked.contains(list[i].uid),
-              onTap: () => setState(() {
-                final id = list[i].uid!;
-                if (!_picked.remove(id)) _picked.add(id);
-              }),
-            ),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 260),
-              child: Text(list[i].payee,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 360),
-              child: Text(list[i].description,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            Checkbox(
-              value: list[i].isApproved,
-              onChanged: user.canEdit
-                  ? (v) => _guard(() => state.setApproval(list[i], v ?? false))
-                  : null,
-            ),
-            Text(displayUser(list[i].approvedBy)),
-            Text(list[i].approvedAt ?? '-'),
-            _rowActions(
-              canEdit: user.canEdit,
-              canDelete: user.canDelete,
-              onEdit: () async {
-                if (await showExpenseDialog(context, editing: list[i])) _load();
-              },
-              onDelete: () async {
-                final ok = await confirmDialog(context,
-                    title: 'حذف هزینه',
-                    message: 'مبلغ ${formatMoney(list[i].amount)} حذف شود؟');
-                if (ok) _guard(() => state.deleteExpense(list[i]));
-              },
-            ),
-          ],
-      ],
-    );
-  }
-
-  Widget _incomesTab(AppState state, AppUser user, ProjectSummary s) {
-    final list = _shownIncomes;
-    final legacy = s.income - _incomes.fold<double>(0, (a, i) => a + i.amount);
-    return Column(
-      children: [
-        _searchBar(_incomeSearch, 'جستجو در تاریخ، مبلغ، ثبت‌کننده', list.length,
-            _incomes.length),
-        Expanded(
-          child: _incomes.isEmpty
-              ? _empty('درآمدی ثبت نشده است.')
-              : list.isEmpty
-                  ? _empty('موردی یافت نشد.')
-                  : _incomesTable(list, state, user),
-        ),
-        if (legacy.abs() > 0.5)
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Text(
-              'توجه: ${formatMoney(legacy)} از درآمد کلی بدون ردیف جزئیات ثبت شده است.',
-              style: TextStyle(color: Theme.of(context).hintColor),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _incomesTable(List<Income> list, AppState state, AppUser user) {
-    return PinnedTable(
-      columns: const [
-        PinnedColumn('ردیف', flex: 1, minWidth: 56),
-        PinnedColumn('تاریخ', flex: 2, minWidth: 110),
-        PinnedColumn('مبلغ', flex: 3, minWidth: 160),
-        PinnedColumn('ثبت‌کننده', flex: 3, minWidth: 140),
-        PinnedColumn('عملیات', flex: 2, minWidth: 110),
-      ],
-      rows: [
-        for (var i = 0; i < list.length; i++)
-          [
-            Text('${i + 1}'),
-            Text(list[i].date),
-            Text(formatNumber(list[i].amount)),
-            Text(displayUser(list[i].createdBy)),
-            _rowActions(
-              canEdit: user.canEdit,
-              canDelete: user.canDelete,
-              onEdit: () async {
-                if (await showIncomeDialog(context, editing: list[i])) _load();
-              },
-              onDelete: () async {
-                final ok = await confirmDialog(context,
-                    title: 'حذف درآمد',
-                    message:
-                        'مبلغ ${formatMoney(list[i].amount)} از درآمد پروژه کسر و حذف شود؟');
-                if (ok) _guard(() => state.deleteIncome(list[i]));
-              },
-            ),
-          ],
-      ],
-    );
-  }
+  Widget _incomesTable(AppState s) => _section(
+        'خلاصه درآمدها',
+        _incomes.isEmpty
+            ? const Padding(padding: EdgeInsets.all(24), child: Text('درآمدی ثبت نشده است'))
+            : DataTable(
+                columns: const [
+                  DataColumn(label: Text('ردیف')), DataColumn(label: Text('تاریخ')), DataColumn(label: Text('مبلغ'), numeric: true),
+                  DataColumn(label: Text('ثبت‌کننده')), DataColumn(label: Text('عملیات')),
+                ],
+                rows: [
+                  for (var i = 0; i < _incomes.length; i++)
+                    DataRow(cells: [
+                      DataCell(Text('${i + 1}')),
+                      DataCell(Text(_incomes[i].date)),
+                      DataCell(Text(Fmt.number(_incomes[i].amount))),
+                      DataCell(Text(_incomes[i].createdBy ?? '—')),
+                      DataCell(Row(children: [
+                        if (s.canEdit) IconButton(tooltip: 'ویرایش', icon: const Icon(Icons.edit_outlined), onPressed: () => _open(IncomeFormScreen(income: _incomes[i]))),
+                        if (s.isAdmin)
+                          IconButton(
+                            tooltip: 'حذف',
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () async {
+                              if (await confirm(context, 'این درآمد حذف شود؟')) await _run(() => s.deleteIncome(_incomes[i].id!));
+                            },
+                          ),
+                      ])),
+                    ]),
+                ],
+              ),
+      );
 }
