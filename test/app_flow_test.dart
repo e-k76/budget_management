@@ -69,7 +69,7 @@ void main() {
     await DatabaseService.instance.addProject('پروژه ب');
     expect(await DatabaseService.instance.dataVersion(), greaterThan(v0));
 
-    await Future<void>.delayed(const Duration(seconds: 5)); // poll interval is 2s
+    await Future<void>.delayed(const Duration(seconds: 3)); // poll interval is 1s
     expect(a.projects.length, before + 1);
     a.logout();
   });

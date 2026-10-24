@@ -1,6 +1,6 @@
 # مدیریت مالی پروژه‌ها — Flutter Desktop (Windows, offline)
 
-Persian RTL financial & project management app. SQLite (WAL) on a shared path, no web server, no network ports.
+Persian RTL financial & project management app. SQLite on a shared path, no web server, no network ports.
 
 ## Structure
 ```
@@ -26,14 +26,13 @@ lib/
 4. First login: `admin` / `admin123` — change it (create a new admin, delete the default one).
 
 Database path: `%USERPROFILE%\Desktop\project_manage\projects.db` (folder auto-created).
-On open: `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;`.
+On open: `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;` (see `DatabaseService.journalMode`: WAL does not work across PCs on a network share, so changes appeared late on other PCs). Each client polls a change counter every second and reloads automatically.
 
 ## Notes / deviations from the brief
 - Added an `incomes` table (ledger) so income items can be listed/edited/deleted; `projects.total_income` is still maintained additively, inside the same transaction.
 - Permissions: admin = everything; manager = add/edit income & expenses + approval toggle; viewer = read-only + scratchpad. Deleting and project creation are admin-only. Enforced in `AppState`, not just by hiding buttons.
 - "مانده هزینه" = income − expenses. "تراز" = income × budget% / 100 − expenses. Budget % is editable by admin on the project page.
 - Dates are stored as `yyyy/mm/dd` Jalali text; the picker is the Material (Gregorian) picker converted to Jalali.
-- SQLite over SMB/DFS is only as safe as the share's locking. WAL needs shared memory (`-shm`), which is **not reliable across network shares**; if you see "database is locked"/corruption with many simultaneous clients, switch to `journal_mode = DELETE` in `database_service.dart`.
 - Passwords are salted SHA-256 (no network exposure, offline); swap for PBKDF2/Argon2 if you need stronger.
 
 ## Build the portable bundle

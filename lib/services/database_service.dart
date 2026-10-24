@@ -8,7 +8,7 @@ import '../models/income.dart';
 import '../models/project.dart';
 import 'auth_service.dart';
 
-/// Single SQLite file on the DFS share. WAL + busy_timeout for multi-client access.
+/// Single SQLite file on the DFS share. Rollback-journal (DELETE) mode + busy_timeout for multi-client access.
 /// Every write is a short, atomic transaction.
 class DatabaseService {
   DatabaseService._();
@@ -16,6 +16,8 @@ class DatabaseService {
 
   static final String dbPath =
       '${Platform.environment['USERPROFILE']}\\Desktop\\project_manage\\projects.db';
+
+  static const String journalMode = 'DELETE';
 
   /// Tests point the service at a temp file instead of the Desktop share.
   static String? pathOverride;
@@ -34,7 +36,12 @@ class DatabaseService {
       options: OpenDatabaseOptions(
         onConfigure: (db) async {
           await db.rawQuery('PRAGMA busy_timeout = 5000;');
-          await db.rawQuery('PRAGMA journal_mode = WAL;');
+          // WAL relies on shared memory (-shm) that does NOT work across PCs on an SMB/DFS
+          // share: other PCs can read stale data until a checkpoint. DELETE mode writes
+          // straight into the main file under network file locks, so every PC sees a
+          // committed change on its next read. Set to 'WAL' only for a local-disk DB.
+          await db.rawQuery('PRAGMA journal_mode = $journalMode;');
+          await db.rawQuery('PRAGMA synchronous = FULL;');
         },
         onOpen: (db) async {
           await _createSchema(db);

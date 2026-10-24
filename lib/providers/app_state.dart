@@ -47,7 +47,7 @@ class AppState extends ChangeNotifier {
   /// Live sync: poll the DB's change counter; reload when another PC (or we) changed data.
   void _startPolling() {
     _poller?.cancel();
-    _poller = Timer.periodic(const Duration(seconds: 2), (_) async {
+    _poller = Timer.periodic(const Duration(seconds: 1), (_) async {
       if (_polling || user == null) return;
       _polling = true;
       try {
