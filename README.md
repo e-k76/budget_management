@@ -1,61 +1,46 @@
-# مدیریت مالی پروژه‌ها — Flutter Desktop (Windows, offline)
+# مدیریت مالی پروژه‌ها (Budget Management)
 
-Persian RTL financial & project management app. SQLite on a shared path, no web server, no network ports.
+Offline Flutter Windows desktop app (Persian RTL, Dana font). SQLite via `sqflite_common_ffi`;
+no web server, no network ports.
 
-## Structure
+* Database: shared file on the DFS server; the path is `AppConfig.dbPath` in `lib/core/app_config.dart` (created on first run; WAL + `busy_timeout=5000`).
+* First login: `admin` / `admin123` — change it from the Users screen.
+* Roles: **admin** (everything), **manager** (add/edit income & expenses, approve, print), **viewer** (read-only).
+* `incomes` is an extra table (beyond the given schema) so income entries can be listed/edited/deleted; `projects.total_income` is kept in sync in the same transaction.
+
+## Layout
+`lib/core` config, theme, formatters, calculator engine · `lib/models` · `lib/services` (database, auth, PDF report) ·
+`lib/providers` (app state) · `lib/screens` · `lib/widgets`.
+
+## Build (Windows)
+Requires Windows **Developer Mode** (plugins need symlinks): `start ms-settings:developers`.
 ```
-lib/
-  main.dart, theme.dart
-  models/      app_user, project, expense, income
-  services/    database_service (schema, PRAGMAs, transactions), auth_service (salted SHA-256), report_service (A4 landscape PDF)
-  providers/   app_state (session, RBAC guards, cached dashboard totals)
-  screens/     login, dashboard, project_details (fl_chart), expense_form, income_form, users, scratchpad
-  widgets/     kpi_card, currency_field (live #,##0), jalali_field, ui helpers
-  utils/       format (money, Jalali), calc (safe expression parser)
-```
-
-## Setup
-1. Install Flutter (>= 3.27) with Windows desktop support + Visual Studio "Desktop development with C++".
-2. Vazirmatn fonts (SIL OFL, see `assets/fonts/OFL.txt`) are bundled in `assets/fonts/`.
-3. The Windows runner is already in `windows/`:
-   ```
-   flutter pub get
-   flutter test
-   flutter run -d windows
-   ```
-4. First login: `admin` / `admin123` — change it (create a new admin, delete the default one).
-
-Database path: `%USERPROFILE%\Desktop\project_manage\projects.db` (folder auto-created).
-On open: `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;` (see `DatabaseService.journalMode`: WAL does not work across PCs on a network share, so changes appeared late on other PCs). Each client polls a change counter every second and reloads automatically.
-
-## Notes / deviations from the brief
-- Added an `incomes` table (ledger) so income items can be listed/edited/deleted; `projects.total_income` is still maintained additively, inside the same transaction.
-- Permissions: admin = everything; manager = add/edit income & expenses + approval toggle; viewer = read-only + scratchpad. Deleting and project creation are admin-only. Enforced in `AppState`, not just by hiding buttons.
-- "مانده هزینه" = income − expenses. "تراز" = income × budget% / 100 − expenses. Budget % is editable by admin on the project page.
-- Dates are stored as `yyyy/mm/dd` Jalali text; the picker is the Material (Gregorian) picker converted to Jalali.
-- Passwords are salted SHA-256 (no network exposure, offline); swap for PBKDF2/Argon2 if you need stronger.
-
-## Offline save-and-retry
-Every income/expense/approval/project change is first written to a local queue
-(`%LOCALAPPDATA%\budget_management\pending_ops.json`) and then sent to the shared DB. If the share is
-unreachable the change stays queued (it survives closing the app), an orange banner shows how many are waiting, and the
-app resends them in order automatically once the share is back. Each queued write carries a unique id recorded in
-`applied_ops`, so a retry never applies a change twice. Changes the server rejects on replay (e.g. editing an income
-another PC deleted) are dropped with a red notice. Not queued (need a live connection): user management and project
-budget %. You must be able to reach the DB once to log in.
-
-## Build the portable bundle
-```
+flutter pub get
+flutter test
 flutter build windows --release
 ```
-Copy the whole folder `build\windows\x64\runner\Release\` (exe + `flutter_windows.dll` + `data\` + plugin DLLs, including `sqlite3.dll`) to the target PCs. Run `budget_management.exe` — no installer.
+Portable bundle: copy the whole `build\windows\x64\runner\Release\` folder; run `budget_management.exe`. No installer needed.
 
 ## Git
 ```
-cd budget_management
-git init -b main
+git init
 git add .
-git commit -m "Initial commit: Flutter desktop financial & project management app"
-git remote add origin https://github.com/<you>/<repo>.git
+git commit -m "Initial commit: budget management desktop app"
+git branch -M main
+git remote add origin https://github.com/<user>/<repo>.git
 git push -u origin main
 ```
+
+## Two databases (offline-first)
+* **Local** `Desktop\project_manage\projects.db` is always written and is the only copy used when the share is unreachable.
+* **Share** the `projects.db` on the DFS server (see `AppConfig.remoteDbPath`) is written too whenever it is reachable, and is what the app reads from while connected.
+* Changes made while the share is unreachable are saved locally and queued (`pending_ops`). The app checks every 10 s; when the share is back it replays the queue in order, then pulls the share's current data into the local copy. The sidebar badge shows the state; click it to retry.
+* First connection to a share that has no projects/expenses/incomes publishes this machine's data (users included). If the share already has data it wins, and the local file is first copied to `projects.db.pre-sync-<time>`.
+* Expenses and incomes carry a unique `uid` so rows can be matched across the two files.
+* `tool/import_access.dart` only touches the local file; the app pushes it to an empty share on the next sync.
+
+## Live sync (v1.1)
+* The shared DB has a change counter (`sync_state`, bumped by triggers on every write). Each PC checks it every second and reloads all open screens as soon as it changes, so a change made on one PC shows on the others within about a second.
+* The shared file uses the rollback journal (`journal_mode = DELETE`) instead of WAL: WAL does not work between PCs over a network share. The switch needs exclusive access, so **close the app on all PCs, then start the new version** (the first one to start converts the file; it keeps working either way).
+* A momentary `database is locked` (another PC writing) no longer drops the app to offline mode: connect/writes retry, and only real connection failures go offline. Pending changes are kept in the local copy and sent automatically.
+* Managers can now delete expenses (admins also delete incomes).

@@ -1,261 +1,901 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:meta/meta.dart' show protected, visibleForTesting;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-import '../models/app_user.dart';
-import '../models/expense.dart';
-import '../models/income.dart';
-import '../models/project.dart';
-import 'auth_service.dart';
-import 'pending_queue.dart';
+import '../core/app_config.dart';
+import '../core/formatters.dart';
+import '../models/models.dart';
 
-/// Single SQLite file on the DFS share. Rollback-journal (DELETE) mode + busy_timeout for multi-client access.
-/// Every write is a short, atomic transaction.
+/// Two-database storage.
+///
+/// * The **local** database (Desktop folder) is always present and always
+///   written.
+/// * The **remote** database (DFS share) is written as well whenever it is
+///   reachable, and is the one read from while connected.
+/// * While the share is unreachable every change is applied locally and also
+///   appended to `pending_ops`. When the share comes back the queue is
+///   replayed to it in order, then the share's data is mirrored back into the
+///   local database (so changes other people made meanwhile are picked up).
+///
+/// Every mutation is a small named operation applied by [_apply]; the same
+/// code runs against both databases and is idempotent so a replay that
+/// overlaps a half-finished write cannot duplicate anything. Rows are matched
+/// by `uid` / `username` / project name, never by the autoincrement id (which
+/// differs between the two files).
 class DatabaseService {
   DatabaseService._();
   static final DatabaseService instance = DatabaseService._();
 
-  static final String dbPath =
-      '${Platform.environment['USERPROFILE']}\\Desktop\\project_manage\\projects.db';
+  // -------------------------------------------------------------- listeners
 
-  static const String journalMode = 'DELETE';
-
-  /// Tests point the service at a temp file instead of the Desktop share.
-  static String? pathOverride;
-
-  Database? _db;
-
-  /// Drop the connection (e.g. after the share went away) so the next call reopens it.
-  Future<void> reset() async {
-    final d = _db;
-    _db = null;
-    try {
-      await d?.close();
-    } catch (_) {}
+  // Plain-Dart change notification (this file must stay usable from `dart run`
+  // tools; the UI wraps it in `DbStatus`, a ChangeNotifier).
+  final List<void Function()> _listeners = [];
+  void addListener(void Function() l) => _listeners.add(l);
+  void removeListener(void Function() l) => _listeners.remove(l);
+  @protected
+  void notifyListeners() {
+    for (final l in List.of(_listeners)) {
+      l();
+    }
   }
 
-  Future<Database> get db async => _db ??= await _open();
+  // ------------------------------------------------------------ configuration
 
-  Future<Database> _open() async {
-    sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
-    final path = pathOverride ?? dbPath;
-    await Directory(File(path).parent.path).create(recursive: true);
-    return databaseFactory.openDatabase(
+  @visibleForTesting
+  String? localPathOverride;
+  @visibleForTesting
+  String? remotePathOverride;
+
+  /// Tools (e.g. the Access importer) turn this off to work on one file only.
+  @visibleForTesting
+  bool remoteEnabled = true;
+
+  /// Tests flip this to simulate the share going away / coming back.
+  @visibleForTesting
+  bool simulateUnreachable = false;
+
+  String get _localPath => localPathOverride ?? AppConfig.localDbPath;
+  String get _remotePath => remotePathOverride ?? AppConfig.remoteDbPath;
+
+  static const _opTimeout = Duration(seconds: 15);
+
+  /// How often each PC checks the shared DB's change counter.
+  @visibleForTesting
+  Duration watchInterval = const Duration(seconds: 1);
+  static const _probeTimeout = Duration(seconds: 4);
+  static const _tables = ['users', 'projects', 'expenses', 'incomes', 'settings'];
+
+  // ------------------------------------------------------------------- state
+
+  Database? _local;
+  Database? _remote;
+  Timer? _timer;
+  Timer? _watchTimer;
+  bool _ticking = false;
+  bool _watching = false;
+  int? _seenRemoteVersion;
+  Future<void> _tail = Future.value();
+
+  bool syncing = false;
+  int pendingCount = 0;
+  String? lastError;
+  DateTime? lastSync;
+
+  /// Bumps whenever the data source changes (went online/offline, synced) so
+  /// screens know to reload.
+  int dataVersion = 0;
+
+  bool get online => _remote != null;
+  @visibleForTesting
+  Database? get remoteHandle => _remote;
+
+  // ------------------------------------------------------------------ schema
+
+  static const List<String> _schema = [
+    '''
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('admin', 'manager', 'viewer')),
+  created_at TEXT
+)''',
+    '''
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  budget_percentage REAL DEFAULT 100.0,
+  total_income REAL DEFAULT 0,
+  created_at TEXT
+)''',
+    '''
+CREATE TABLE IF NOT EXISTS expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_name TEXT NOT NULL,
+  date TEXT NOT NULL,
+  amount REAL NOT NULL,
+  percentage REAL DEFAULT 0,
+  description TEXT,
+  payee TEXT,
+  uid TEXT,
+  is_approved INTEGER DEFAULT 0,
+  approved_by TEXT,
+  approved_at TEXT,
+  created_by TEXT,
+  created_at TEXT
+)''',
+    // Individual income entries; projects.total_income is the running total.
+    '''
+CREATE TABLE IF NOT EXISTS incomes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_name TEXT NOT NULL,
+  amount REAL NOT NULL,
+  date TEXT NOT NULL,
+  uid TEXT,
+  created_by TEXT,
+  created_at TEXT
+)''',
+    // Key/value app settings (e.g. the global budget percentage).
+    '''
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)''',
+    // Changes made while the share was unreachable (only used in the local file).
+    '''
+CREATE TABLE IF NOT EXISTS pending_ops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT
+)''',
+    // Local-only bookkeeping (last successful sync, ...).
+    '''
+CREATE TABLE IF NOT EXISTS sync_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)''',
+    'CREATE INDEX IF NOT EXISTS idx_expenses_project ON expenses(project_name)',
+    'CREATE INDEX IF NOT EXISTS idx_incomes_project ON incomes(project_name)',
+  ];
+
+  /// Live-sync change counter: any insert/update/delete on a data table bumps
+  /// `sync_state.version` inside the same transaction. Other PCs poll this one
+  /// row (see [_watch]) and reload as soon as it changes. Triggers live in the
+  /// database file, so they fire for every writer.
+  static final List<String> _syncSchema = [
+    'CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)',
+    'INSERT OR IGNORE INTO sync_state (id, version) VALUES (1, 0)',
+    for (final t in _tables)
+      for (final op in ['INSERT', 'UPDATE', 'DELETE'])
+        'CREATE TRIGGER IF NOT EXISTS trg_sync_${t}_${op.toLowerCase()} '
+            'AFTER $op ON $t BEGIN UPDATE sync_state SET version = version + 1 WHERE id = 1; END',
+  ];
+
+  /// Upgrades databases created before a column existed.
+  static Future<void> _migrate(Transaction txn) async {
+    Future<bool> hasColumn(String table, String col) async =>
+        (await txn.rawQuery('PRAGMA table_info($table)'))
+            .any((c) => c['name'] == col);
+
+    if (!await hasColumn('expenses', 'payee')) {
+      await txn.execute('ALTER TABLE expenses ADD COLUMN payee TEXT');
+    }
+    if (!await hasColumn('expenses', 'approved_at')) {
+      await txn.execute('ALTER TABLE expenses ADD COLUMN approved_at TEXT');
+    }
+    for (final t in ['expenses', 'incomes']) {
+      if (!await hasColumn(t, 'uid')) {
+        await txn.execute('ALTER TABLE $t ADD COLUMN uid TEXT');
+      }
+      await txn.execute(
+          "UPDATE $t SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL OR uid = ''");
+      await txn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_${t}_uid ON $t(uid)');
+    }
+    // Rows from the Access import stored "payee — description" in one field.
+    await txn.execute('''
+UPDATE expenses SET
+  payee = trim(substr(description, 1, instr(description, ' — ') - 1)),
+  description = trim(substr(description, instr(description, ' — ') + 3))
+WHERE created_by = 'Access import' AND payee IS NULL
+  AND instr(description, ' — ') > 0
+''');
+  }
+
+  static bool _ffiReady = false;
+
+  /// [shared] = the file on the network share (see journal-mode note below).
+  static Future<Database> _open(String path, {bool shared = false}) async {
+    if (!_ffiReady) {
+      sqfliteFfiInit();
+      _ffiReady = true;
+    }
+    await File(path).parent.create(recursive: true);
+    return databaseFactoryFfi.openDatabase(
       path,
       options: OpenDatabaseOptions(
         onConfigure: (db) async {
-          await db.rawQuery('PRAGMA busy_timeout = 5000;');
-          // WAL relies on shared memory (-shm) that does NOT work across PCs on an SMB/DFS
-          // share: other PCs can read stale data until a checkpoint. DELETE mode writes
-          // straight into the main file under network file locks, so every PC sees a
-          // committed change on its next read. Set to 'WAL' only for a local-disk DB.
-          await db.rawQuery('PRAGMA journal_mode = $journalMode;');
-          await db.rawQuery('PRAGMA synchronous = FULL;');
+          // These PRAGMAs return a row, so they must go through rawQuery.
+          await db.rawQuery('PRAGMA busy_timeout = ${shared ? 10000 : 5000}');
+          if (shared) {
+            // WAL needs shared memory (-shm) that does not work between PCs over
+            // SMB/DFS, so other PCs see changes late (or not at all). The shared
+            // file uses the classic rollback journal: every commit goes straight
+            // into the main file under network locks. The PC-local copy keeps WAL.
+            try {
+              await db.rawQuery('PRAGMA journal_mode = DELETE');
+              await db.rawQuery('PRAGMA synchronous = FULL');
+            } catch (_) {
+              // Another PC still has the file open in WAL (old version): the
+              // switch happens once everyone has updated. Keep working meanwhile.
+            }
+          } else {
+            await db.rawQuery('PRAGMA journal_mode = WAL');
+          }
         },
         onOpen: (db) async {
-          await _createSchema(db);
-          await _seedAdmin(db);
+          await db.transaction((txn) async {
+            for (final sql in [..._schema, ..._syncSchema]) {
+              await txn.execute(sql);
+            }
+            await _migrate(txn);
+          });
         },
       ),
     );
   }
 
-  Future<void> _createSchema(Database db) async {
-    const ddl = [
-      '''CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        full_name TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('admin', 'manager', 'viewer')),
-        created_at TEXT
-      )''',
-      '''CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        budget_percentage REAL DEFAULT 100.0,
-        total_income REAL DEFAULT 0,
-        created_at TEXT
-      )''',
-      '''CREATE TABLE IF NOT EXISTS expenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_name TEXT NOT NULL,
-        date TEXT NOT NULL,
-        amount REAL NOT NULL,
-        percentage REAL DEFAULT 0,
-        description TEXT,
-        is_approved INTEGER DEFAULT 0,
-        approved_by TEXT,
-        created_by TEXT,
-        created_at TEXT
-      )''',
-      // Addition to the spec'd schema: individual income entries so they can be
-      // listed/edited/deleted. projects.total_income stays the additive running total.
-      '''CREATE TABLE IF NOT EXISTS incomes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_name TEXT NOT NULL,
-        amount REAL NOT NULL,
-        date TEXT,
-        created_by TEXT,
-        created_at TEXT
-      )''',
-      // Ids of queued writes already applied, so replays after a network drop are idempotent.
-      'CREATE TABLE IF NOT EXISTS applied_ops (op_id TEXT PRIMARY KEY, applied_at TEXT)',
-      'CREATE INDEX IF NOT EXISTS idx_expenses_project ON expenses(project_name)',
-      'CREATE INDEX IF NOT EXISTS idx_incomes_project ON incomes(project_name)',
-    ];
-    for (final s in ddl) {
-      await db.execute(s);
-    }
-    await _createSyncTriggers(db);
-    await db.execute("DELETE FROM applied_ops WHERE applied_at < ?", [DateTime.now().subtract(const Duration(days: 30)).toIso8601String()]);
+  static String _now() => DateTime.now().toIso8601String();
+
+  static String newUid() {
+    final r = Random.secure();
+    return List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
+        .join();
   }
 
-  /// Live sync: every insert/update/delete on any table bumps `sync_state.version`
-  /// (inside the same transaction as the change). Other PCs poll this single row
-  /// and reload when it changes.
-  Future<void> _createSyncTriggers(Database db) async {
-    await db.execute('CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
-    await db.execute('INSERT OR IGNORE INTO sync_state (id, version) VALUES (1, 0)');
-    for (final t in ['users', 'projects', 'expenses', 'incomes']) {
-      for (final op in ['INSERT', 'UPDATE', 'DELETE']) {
-        await db.execute('CREATE TRIGGER IF NOT EXISTS trg_sync_${t}_${op.toLowerCase()} '
-            'AFTER $op ON $t BEGIN UPDATE sync_state SET version = version + 1 WHERE id = 1; END');
+  // ------------------------------------------------------------- life cycle
+
+  Future<Database> _ensureLocal() async => _local ??= await _open(_localPath);
+
+  /// The database reads currently come from (remote when connected).
+  Future<Database> get db async => _remote ?? await _ensureLocal();
+
+  /// Opens the local database, starts the connection watcher and tries the
+  /// share. The first attempt runs in the background (so an unreachable share
+  /// never delays start-up) unless [waitForConnection] is set.
+  Future<void> init({bool waitForConnection = false}) async {
+    await _locked(() async {
+      await _ensureLocal();
+      await _refreshPending();
+      await _loadLastSync();
+    });
+    _timer?.cancel();
+    if (!remoteEnabled) return;
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) => tick());
+    _watchTimer?.cancel();
+    _watchTimer = Timer.periodic(watchInterval, (_) => _watch());
+    final first = tick();
+    if (waitForConnection) await first;
+  }
+
+  Future<void> close() async {
+    _timer?.cancel();
+    _timer = null;
+    _watchTimer?.cancel();
+    _watchTimer = null;
+    await _tail.catchError((_) {});
+    final r = _remote, l = _local;
+    _remote = null;
+    _local = null;
+    try {
+      await r?.close();
+    } catch (_) {}
+    await l?.close();
+    pendingCount = 0;
+  }
+
+  Future<T> _locked<T>(Future<T> Function() f) async {
+    final prev = _tail;
+    final done = Completer<void>();
+    _tail = done.future;
+    try {
+      await prev;
+    } catch (_) {}
+    try {
+      return await f();
+    } finally {
+      done.complete();
+    }
+  }
+
+  // --------------------------------------------------------------- connection
+
+  Future<bool> _remoteReachable() async {
+    if (simulateUnreachable) return false;
+    try {
+      return await Directory(File(_remotePath).parent.path)
+          .exists()
+          .timeout(_probeTimeout);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _goOffline(Object e) {
+    lastError = '$e';
+    final r = _remote;
+    _seenRemoteVersion = null;
+    if (r != null) {
+      _remote = null;
+      r.close().catchError((_) {});
+      dataVersion++;
+    }
+    notifyListeners();
+  }
+
+  /// Periodic check: reconnect + sync when the share is back, or notice that
+  /// it has gone away.
+  Future<void> tick() async {
+    if (!remoteEnabled || _ticking || _local == null) return;
+    _ticking = true;
+    try {
+      if (_remote == null) {
+        if (!await _remoteReachable()) return;
+        await _locked(_connectAndSync);
+      } else {
+        try {
+          if (simulateUnreachable) throw StateError('share unreachable');
+          await _remote!.rawQuery('SELECT 1').timeout(_probeTimeout);
+          if (pendingCount > 0) await _locked(_sync);
+        } catch (e) {
+          if (!_isBusy(e)) _goOffline(e);
+        }
+      }
+    } finally {
+      _ticking = false;
+    }
+  }
+
+  /// Live sync: while connected, look at the shared DB's change counter every
+  /// [watchInterval]. When another PC (or this one) changed anything, bump
+  /// [dataVersion] so every open screen reloads from the share right away.
+  Future<void> _watch() async {
+    final r = _remote;
+    if (r == null || _watching || _ticking || syncing || !remoteEnabled) return;
+    _watching = true;
+    try {
+      if (simulateUnreachable) throw StateError('share unreachable');
+      final rows = await r
+          .rawQuery('SELECT version FROM sync_state WHERE id = 1')
+          .timeout(_probeTimeout);
+      final v = rows.first['version'] as int;
+      final prev = _seenRemoteVersion;
+      _seenRemoteVersion = v;
+      if (prev != null && prev != v) {
+        dataVersion++;
+        notifyListeners();
+      }
+    } catch (e) {
+      if (_isBusy(e)) return; // locked for a moment: look again next second
+      if (identical(_remote, r)) _goOffline(e);
+    } finally {
+      _watching = false;
+    }
+  }
+
+  /// Manual "sync now".
+  Future<void> syncNow() => tick();
+
+  Future<void> _connectAndSync() async {
+    if (!remoteEnabled || _local == null) return;
+    if (_remote == null) {
+      if (!await _remoteReachable()) return;
+      for (var attempt = 0;; attempt++) {
+        try {
+          _remote = await _open(_remotePath, shared: true).timeout(_opTimeout);
+          dataVersion++;
+          notifyListeners();
+          break;
+        } catch (e) {
+          // The share is reachable but another PC holds a lock for a moment:
+          // try again right away instead of waiting for the next 10 s tick.
+          if (_isBusy(e) && attempt < 2) {
+            await Future<void>.delayed(const Duration(seconds: 1));
+            continue;
+          }
+          lastError = '$e';
+          notifyListeners();
+          return;
+        }
       }
     }
+    await _sync();
   }
 
-  Future<int> dataVersion() async =>
-      (await (await db).rawQuery('SELECT version FROM sync_state WHERE id = 1')).first['version'] as int;
-
-  Future<void> _seedAdmin(Database db) async {
-    final c = (await db.rawQuery('SELECT COUNT(*) AS c FROM users')).first['c'] as int;
-    if (c == 0) {
-      await db.insert('users', {
-        'username': 'admin',
-        'password_hash': AuthService.hashPassword('admin123'),
-        'full_name': 'مدیر سیستم',
-        'role': 'admin',
-        'created_at': _now(),
-      });
+  Future<void> _sync() async {
+    final remote = _remote, local = _local;
+    if (remote == null || local == null) return;
+    syncing = true;
+    notifyListeners();
+    try {
+      if (await _hasNoBusinessData(remote)) {
+        // A brand-new share: publish this machine's data (incl. users).
+        await _copyAll(from: local, to: remote);
+        await local.delete('pending_ops');
+      } else {
+        if (await _meta('last_sync') == null) await _backupLocalFile();
+        final ops = await local.query('pending_ops', orderBy: 'id');
+        for (final row in ops) {
+          final data = jsonDecode(row['data'] as String) as Map<String, Object?>;
+          await remote
+              .transaction((txn) => _apply(txn, row['kind'] as String, data))
+              .timeout(_opTimeout);
+          await local.delete('pending_ops', where: 'id = ?', whereArgs: [row['id']]);
+        }
+        await _copyAll(from: remote, to: local);
+      }
+      lastSync = DateTime.now();
+      await _setMeta('last_sync', lastSync!.toIso8601String());
+      lastError = null;
+      dataVersion++;
+    } catch (e) {
+      _goOffline(e);
+    } finally {
+      syncing = false;
+      await _refreshPending();
+      notifyListeners();
     }
   }
 
-  String _now() => DateTime.now().toIso8601String();
-
-  // ---------------- Users ----------------
-  Future<Map<String, Object?>?> findUserRow(String username) async {
-    final r = await (await db).query('users', where: 'username = ?', whereArgs: [username], limit: 1);
-    return r.isEmpty ? null : r.first;
+  static Future<bool> _hasNoBusinessData(Database d) async {
+    final r = await d.rawQuery('SELECT (SELECT COUNT(*) FROM projects) + '
+        '(SELECT COUNT(*) FROM expenses) + (SELECT COUNT(*) FROM incomes) AS c');
+    return ((r.first['c'] as int?) ?? 0) == 0;
   }
 
-  Future<List<AppUser>> users() async =>
-      (await (await db).query('users', orderBy: 'id')).map(AppUser.fromMap).toList();
+  /// Replaces the data tables of [to] with those of [from].
+  static Future<void> _copyAll({required Database from, required Database to}) async {
+    final data = <String, List<Map<String, Object?>>>{
+      for (final t in _tables) t: await from.query(t),
+    };
+    await to.transaction((txn) async {
+      for (final t in _tables) {
+        await txn.delete(t);
+      }
+      final batch = txn.batch();
+      for (final t in _tables) {
+        for (final row in data[t]!) {
+          batch.insert(t, row);
+        }
+      }
+      await batch.commit(noResult: true);
+    });
+  }
 
-  Future<void> insertUser(String username, String hash, String fullName, String role) async =>
-      (await db).insert('users', {
+  Future<void> _backupLocalFile() async {
+    final l = _local;
+    if (l == null) return;
+    try {
+      await l.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+      final stamp = _now().replaceAll(':', '-').split('.').first;
+      await File(_localPath).copy('$_localPath.pre-sync-$stamp');
+    } catch (_) {
+      // Best effort; the share is the source of truth from here on.
+    }
+  }
+
+  Future<String?> _meta(String key) async {
+    final rows = await _local!
+        .query('sync_meta', where: 'key = ?', whereArgs: [key], limit: 1);
+    return rows.isEmpty ? null : rows.first['value'] as String;
+  }
+
+  Future<void> _setMeta(String key, String value) async {
+    await _local!.insert('sync_meta', {'key': key, 'value': value},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> _loadLastSync() async {
+    final v = await _meta('last_sync');
+    lastSync = v == null ? null : DateTime.tryParse(v);
+  }
+
+  Future<void> _refreshPending() async {
+    final l = _local;
+    if (l == null) return;
+    final r = await l.rawQuery('SELECT COUNT(*) AS c FROM pending_ops');
+    pendingCount = (r.first['c'] as int?) ?? 0;
+  }
+
+  // ------------------------------------------------------- read / write core
+
+  Future<T> _read<T>(Future<T> Function(Database d) f) async {
+    final r = _remote;
+    if (r != null) {
+      try {
+        return await f(r).timeout(_opTimeout);
+      } catch (e) {
+        _goOffline(e);
+      }
+    }
+    return f(await _ensureLocal());
+  }
+
+  /// SQLITE_BUSY: another PC holds a lock right now. That is NOT "server
+  /// unreachable": retry shortly instead of dropping to offline mode.
+  static bool _isBusy(Object e) {
+    final s = e.toString();
+    return s.contains('sqlite_error: 5,') ||
+        s.contains('database is locked') ||
+        s.contains('database is busy');
+  }
+
+  static bool _isConstraint(Object e) =>
+      e is DatabaseException && e.toString().contains('UNIQUE');
+
+  Future<void> _mutate(String kind, Map<String, Object?> data) {
+    return _locked(() async {
+      final local = await _ensureLocal();
+      await local.transaction((txn) => _apply(txn, kind, data));
+
+      final remote = _remote;
+      if (remote != null) {
+        for (var attempt = 0;; attempt++) {
+          try {
+            await remote
+                .transaction((txn) => _apply(txn, kind, data))
+                .timeout(_opTimeout);
+            return;
+          } catch (e) {
+            if (_isConstraint(e)) return;
+            // Briefly locked by another PC: _apply is idempotent, so just retry.
+            if (_isBusy(e) && attempt < 3) {
+              await Future<void>.delayed(const Duration(milliseconds: 400));
+              continue;
+            }
+            _goOffline(e);
+            break;
+          }
+        }
+      }
+      await local.insert('pending_ops', {
+        'kind': kind,
+        'data': jsonEncode(data),
+        'created_at': _now(),
+      });
+      await _refreshPending();
+      notifyListeners();
+    });
+  }
+
+  /// Applies one operation. Runs against both databases, so it must only use
+  /// stable keys and must be safe to run twice.
+  static Future<void> _apply(
+      DatabaseExecutor x, String kind, Map<String, Object?> d) async {
+    Future<Map<String, Object?>?> byUid(String table) async {
+      final rows = await x.query(table,
+          where: 'uid = ?', whereArgs: [d['uid']], limit: 1);
+      return rows.isEmpty ? null : rows.first;
+    }
+
+    switch (kind) {
+      case 'project_add':
+        await x.rawInsert(
+          'INSERT OR IGNORE INTO projects (name, budget_percentage, total_income, created_at) '
+          'VALUES (?, 100.0, 0, ?)',
+          [d['name'], d['created_at']],
+        );
+      case 'setting_set':
+        await x.insert('settings', {'key': d['key'], 'value': d['value']},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+
+      case 'user_add':
+        await x.rawInsert(
+          'INSERT OR IGNORE INTO users (username, password_hash, full_name, role, created_at) '
+          'VALUES (?, ?, ?, ?, ?)',
+          [d['username'], d['password_hash'], d['full_name'], d['role'], d['created_at']],
+        );
+      case 'user_role':
+        await x.update('users', {'role': d['role']},
+            where: 'username = ?', whereArgs: [d['username']]);
+      case 'user_password':
+        await x.update('users', {'password_hash': d['password_hash']},
+            where: 'username = ?', whereArgs: [d['username']]);
+      case 'user_delete':
+        await x.delete('users', where: 'username = ?', whereArgs: [d['username']]);
+      case 'user_rename':
+        await x.update('users', {'full_name': d['new']},
+            where: 'username = ?', whereArgs: [d['username']]);
+        if (d['old'] != d['new']) {
+          for (final (table, col) in const [
+            ('expenses', 'approved_by'),
+            ('expenses', 'created_by'),
+            ('incomes', 'created_by'),
+          ]) {
+            await x.update(table, {col: d['new']},
+                where: '$col = ?', whereArgs: [d['old']]);
+          }
+        }
+
+      case 'expense_add':
+        if (await byUid('expenses') != null) return;
+        await x.insert('expenses', {
+          'uid': d['uid'],
+          'project_name': d['project_name'],
+          'date': d['date'],
+          'amount': d['amount'],
+          'payee': d['payee'],
+          'description': d['description'],
+          'is_approved': 0,
+          'created_by': d['created_by'],
+          'created_at': d['created_at'],
+        });
+      case 'expense_update':
+        await x.update(
+          'expenses',
+          {
+            'project_name': d['project_name'],
+            'date': d['date'],
+            'amount': d['amount'],
+            'payee': d['payee'],
+            'description': d['description'],
+          },
+          where: 'uid = ?',
+          whereArgs: [d['uid']],
+        );
+      case 'expense_approval':
+        final approved = d['approved'] == 1;
+        await x.update(
+          'expenses',
+          {
+            'is_approved': approved ? 1 : 0,
+            'approved_by': approved ? d['by'] : null,
+            'approved_at': approved ? d['at'] : null,
+          },
+          where: 'uid = ?',
+          whereArgs: [d['uid']],
+        );
+      case 'expense_delete':
+        await x.delete('expenses', where: 'uid = ?', whereArgs: [d['uid']]);
+
+      case 'income_add':
+        if (await byUid('incomes') != null) return;
+        await x.insert('incomes', {
+          'uid': d['uid'],
+          'project_name': d['project_name'],
+          'amount': d['amount'],
+          'date': d['date'],
+          'created_by': d['created_by'],
+          'created_at': d['created_at'],
+        });
+        await x.rawUpdate(
+          'UPDATE projects SET total_income = total_income + ? WHERE name = ?',
+          [d['amount'], d['project_name']],
+        );
+      case 'income_update':
+        final row = await byUid('incomes');
+        if (row == null) return;
+        final old = (row['amount'] as num).toDouble();
+        final amount = (d['amount'] as num).toDouble();
+        await x.update('incomes', {'amount': amount},
+            where: 'uid = ?', whereArgs: [d['uid']]);
+        await x.rawUpdate(
+          'UPDATE projects SET total_income = total_income + ? WHERE name = ?',
+          [amount - old, row['project_name']],
+        );
+      case 'income_delete':
+        final row = await byUid('incomes');
+        if (row == null) return;
+        await x.delete('incomes', where: 'uid = ?', whereArgs: [d['uid']]);
+        await x.rawUpdate(
+          'UPDATE projects SET total_income = total_income - ? WHERE name = ?',
+          [row['amount'], row['project_name']],
+        );
+
+      default:
+        throw StateError('unknown operation $kind');
+    }
+  }
+
+  // ---------------------------------------------------------------- users
+
+  Future<int> userCount() => _read((d) async {
+        final r = await d.rawQuery('SELECT COUNT(*) AS c FROM users');
+        return (r.first['c'] as int?) ?? 0;
+      });
+
+  Future<List<AppUser>> getUsers() => _read((d) async {
+        final rows = await d.query('users', orderBy: 'id');
+        return rows.map(AppUser.fromMap).toList();
+      });
+
+  Future<Map<String, Object?>?> getUserRowByUsername(String username) =>
+      _read((d) async {
+        final rows = await d.query('users',
+            where: 'username = ?', whereArgs: [username], limit: 1);
+        return rows.isEmpty ? null : rows.first;
+      });
+
+  Future<void> insertUser({
+    required String username,
+    required String passwordHash,
+    required String fullName,
+    required String role,
+  }) =>
+      _mutate('user_add', {
         'username': username,
-        'password_hash': hash,
+        'password_hash': passwordHash,
         'full_name': fullName,
         'role': role,
         'created_at': _now(),
       });
 
-  Future<void> deleteUser(int id) async => (await db).delete('users', where: 'id = ?', whereArgs: [id]);
+  Future<void> updateUserRole(String username, String role) =>
+      _mutate('user_role', {'username': username, 'role': role});
 
-  // ---------------- Projects ----------------
-  Future<List<Project>> projects() async {
-    final rows = await (await db).rawQuery('''
-      SELECT p.*, COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.project_name = p.name), 0) AS total_expenses
-      FROM projects p ORDER BY p.id''');
-    return rows.map(Project.fromMap).toList();
-  }
+  Future<void> updateUserPassword(String username, String passwordHash) =>
+      _mutate('user_password', {'username': username, 'password_hash': passwordHash});
 
-  Future<void> setBudgetPercentage(int id, double pct) async =>
-      (await db).update('projects', {'budget_percentage': pct}, where: 'id = ?', whereArgs: [id]);
+  /// Renames a user and carries the new name into the creator/approver stamps
+  /// that were written with the old one.
+  Future<void> updateUserFullName(String username, String oldName, String newName) =>
+      _mutate('user_rename', {'username': username, 'old': oldName, 'new': newName});
 
-  // ---------------- Expenses ----------------
-  Future<List<Expense>> expenses(String projectName) async => (await (await db).query('expenses',
-          where: 'project_name = ?', whereArgs: [projectName], orderBy: 'date DESC, id DESC'))
-      .map(Expense.fromMap)
-      .toList();
+  Future<int> adminCount() => _read((d) async {
+        final r = await d
+            .rawQuery("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'");
+        return (r.first['c'] as int?) ?? 0;
+      });
 
-  // ---------------- Incomes ----------------
-  Future<List<Income>> incomes(String projectName) async => (await (await db).query('incomes',
-          where: 'project_name = ?', whereArgs: [projectName], orderBy: 'id DESC'))
-      .map(Income.fromMap)
-      .toList();
+  Future<void> deleteUser(String username) =>
+      _mutate('user_delete', {'username': username});
 
-  // ---------------- Writes (queued, idempotent) ----------------
-  /// Applies one queued write in a single short transaction. If its id was already applied
-  /// (e.g. the commit reached the share but the confirmation was lost) it is a no-op.
-  Future<void> apply(PendingOp op) async {
-    await (await db).transaction((t) async {
-      if ((await t.rawQuery('SELECT 1 FROM applied_ops WHERE op_id = ?', [op.id])).isNotEmpty) return;
-      await t.insert('applied_ops', {'op_id': op.id, 'applied_at': _now()});
-      final d = op.data;
-      switch (op.type) {
-        case 'addProject':
-          await t.insert('projects', {'name': (d['name'] as String).trim(), 'created_at': op.at});
-        case 'addExpense':
-          await t.insert('expenses', {
-            'project_name': d['project'],
-            'date': d['date'],
-            'amount': d['amount'],
-            'percentage': d['percentage'],
-            'description': d['description'],
-            'is_approved': 0,
-            'created_by': d['user'],
-            'created_at': op.at,
-          });
-        case 'updateExpense':
-          await t.update(
-              'expenses',
-              {
-                'project_name': d['project'],
-                'date': d['date'],
-                'amount': d['amount'],
-                'percentage': d['percentage'],
-                'description': d['description'],
-              },
-              where: 'id = ?',
-              whereArgs: [d['id']]);
-        case 'deleteExpense':
-          await t.delete('expenses', where: 'id = ?', whereArgs: [d['id']]);
-        case 'setApproval':
-          final ok = d['approved'] == true;
-          await t.update('expenses', {'is_approved': ok ? 1 : 0, 'approved_by': ok ? d['user'] : null},
-              where: 'id = ?', whereArgs: [d['id']]);
-        case 'addIncome':
-          // total_income = total_income + amount, atomically with the ledger row
-          await t.insert('incomes', {
-            'project_name': d['project'],
-            'amount': d['amount'],
-            'date': d['date'],
-            'created_by': d['user'],
-            'created_at': op.at,
-          });
-          await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?',
-              [d['amount'], d['project']]);
-        case 'updateIncome':
-          final old = await _incomeRow(t, d['id']);
-          final diff = (d['amount'] as num).toDouble() - (old['amount'] as num).toDouble();
-          await t.update('incomes', {'amount': d['amount'], 'date': d['date']}, where: 'id = ?', whereArgs: [d['id']]);
-          await t.rawUpdate('UPDATE projects SET total_income = total_income + ? WHERE name = ?', [diff, old['project_name']]);
-        case 'deleteIncome':
-          final old = await _incomeRow(t, d['id']);
-          await t.delete('incomes', where: 'id = ?', whereArgs: [d['id']]);
-          await t.rawUpdate('UPDATE projects SET total_income = total_income - ? WHERE name = ?', [old['amount'], old['project_name']]);
-        default:
-          throw StateError('عملیات ناشناخته: ${op.type}');
-      }
+  // ------------------------------------------------------------- projects
+
+  Future<List<Project>> getProjects() => _read((d) async {
+        final rows = await d.query('projects', orderBy: 'name COLLATE NOCASE');
+        return rows.map(Project.fromMap).toList();
+      });
+
+  Future<List<ProjectSummary>> getProjectSummaries() async {
+    final pct = await getBudgetPercentage();
+    return _read((d) async {
+      final rows = await d.rawQuery('''
+SELECT p.*,
+  COALESCE((SELECT SUM(e.amount) FROM expenses e
+            WHERE e.project_name = p.name), 0) AS total_expenses,
+  COALESCE((SELECT SUM(e.amount) FROM expenses e
+            WHERE e.project_name = p.name AND e.is_approved = 1), 0)
+            AS approved_expenses
+FROM projects p
+ORDER BY p.name COLLATE NOCASE
+''');
+      return rows.map((r) => ProjectSummary.fromMap(r, pct)).toList();
     });
   }
 
-  Future<Map<String, Object?>> _incomeRow(DatabaseExecutor t, Object? id) async {
-    final r = await t.query('incomes', where: 'id = ?', whereArgs: [id]);
-    if (r.isEmpty) throw StateError('این درآمد دیگر وجود ندارد (احتمالاً در رایانه دیگری حذف شده است)');
-    return r.first;
+  Future<ProjectSummary?> getProjectSummary(String name) async {
+    final all = await getProjectSummaries();
+    for (final s in all) {
+      if (s.name == name) return s;
+    }
+    return null;
   }
+
+  Future<void> insertProject(String name) =>
+      _mutate('project_add', {'name': name, 'created_at': _now()});
+
+  static const _budgetKey = 'budget_percentage';
+
+  /// The single budget percentage applied to every project (default 100).
+  Future<double> getBudgetPercentage() => _read((d) async {
+        final rows = await d.query('settings',
+            where: 'key = ?', whereArgs: [_budgetKey], limit: 1);
+        if (rows.isEmpty) return 100.0;
+        return double.tryParse(rows.first['value'] as String) ?? 100.0;
+      });
+
+  Future<void> setBudgetPercentage(double pct) =>
+      _mutate('setting_set', {'key': _budgetKey, 'value': pct.toString()});
+
+  /// Sums per Jalali month ("yyyy/MM") across all projects, for the dashboard
+  /// trend chart. Returns (incomeByMonth, expenseByMonth).
+  Future<(Map<String, double>, Map<String, double>)> getMonthlyTotals() =>
+      _read((d) async {
+        Future<Map<String, double>> sums(String table) async {
+          final rows = await d.rawQuery(
+              'SELECT substr(date, 1, 7) AS m, SUM(amount) AS s FROM $table GROUP BY m');
+          return {
+            for (final r in rows)
+              if (r['m'] != null) r['m'] as String: (r['s'] as num).toDouble(),
+          };
+        }
+
+        return (await sums('incomes'), await sums('expenses'));
+      });
+
+  // ------------------------------------------------------------- expenses
+
+  /// Every expense / income across all projects, newest first.
+  Future<List<Expense>> getAllExpenses() => _read((d) async {
+        final rows = await d.query('expenses', orderBy: 'date DESC, id DESC');
+        return rows.map(Expense.fromMap).toList();
+      });
+
+  Future<List<Income>> getAllIncomes() => _read((d) async {
+        final rows = await d.query('incomes', orderBy: 'date DESC, id DESC');
+        return rows.map(Income.fromMap).toList();
+      });
+
+  Future<List<Expense>> getExpenses(String projectName) => _read((d) async {
+        final rows = await d.query('expenses',
+            where: 'project_name = ?',
+            whereArgs: [projectName],
+            orderBy: 'date DESC, id DESC');
+        return rows.map(Expense.fromMap).toList();
+      });
+
+  Future<void> insertExpense(Expense e, String createdBy) =>
+      _mutate('expense_add', {
+        'uid': newUid(),
+        'project_name': e.projectName,
+        'date': e.date,
+        'amount': e.amount,
+        'payee': e.payee,
+        'description': e.description,
+        'created_by': createdBy,
+        'created_at': _now(),
+      });
+
+  Future<void> updateExpense(Expense e) => _mutate('expense_update', {
+        'uid': e.uid,
+        'project_name': e.projectName,
+        'date': e.date,
+        'amount': e.amount,
+        'payee': e.payee,
+        'description': e.description,
+      });
+
+  /// Ticks or unticks an expense. The approval date (Jalali) is stamped now.
+  Future<void> setExpenseApproval(String uid, bool approved, String by,
+          {String? at}) =>
+      _mutate('expense_approval', {
+        'uid': uid,
+        'approved': approved ? 1 : 0,
+        'by': by,
+        'at': approved ? (at ?? todayJalali()) : null,
+      });
+
+  Future<void> deleteExpense(String uid) => _mutate('expense_delete', {'uid': uid});
+
+  // -------------------------------------------------------------- incomes
+
+  Future<List<Income>> getIncomes(String projectName) => _read((d) async {
+        final rows = await d.query('incomes',
+            where: 'project_name = ?',
+            whereArgs: [projectName],
+            orderBy: 'date DESC, id DESC');
+        return rows.map(Income.fromMap).toList();
+      });
+
+  /// Inserts an income row and additively bumps projects.total_income.
+  Future<void> addIncome(Income i, String createdBy) => _mutate('income_add', {
+        'uid': newUid(),
+        'project_name': i.projectName,
+        'amount': i.amount,
+        'date': i.date,
+        'created_by': createdBy,
+        'created_at': _now(),
+      });
+
+  Future<void> updateIncomeAmount(String uid, double newAmount) =>
+      _mutate('income_update', {'uid': uid, 'amount': newAmount});
+
+  Future<void> deleteIncome(String uid) => _mutate('income_delete', {'uid': uid});
 }
