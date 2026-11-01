@@ -462,7 +462,11 @@ WHERE created_by = 'Access import' AND payee IS NULL
             await Future<void>.delayed(const Duration(seconds: 1));
             continue;
           }
-          lastError = 'باز کردن پایگاه داده سرور ناموفق بود: $e';
+          lastError = _isBusy(e)
+              ? 'پایگاه داده سرور توسط یک رایانه/برنامه دیگر قفل شده است '
+                  '(برنامه را روی همه رایانه‌ها ببندید یا فایل باز را در سرور ببندید). '
+                  '${await _sideFiles()}\n$e'
+              : 'باز کردن پایگاه داده سرور ناموفق بود: $e';
           notifyListeners();
           return;
         }
@@ -582,6 +586,22 @@ WHERE created_by = 'Access import' AND payee IS NULL
       }
     }
     return f(await _ensureLocal());
+  }
+
+  /// Describes the helper files SQLite keeps next to the shared DB. A leftover
+  /// `-journal` means a writer crashed mid-commit; `-wal`/`-shm` mean a PC is
+  /// (or was) connected in WAL mode. Shown in the error text to find stuck locks.
+  Future<String> _sideFiles() async {
+    final parts = <String>[];
+    for (final suffix in ['-journal', '-wal', '-shm']) {
+      try {
+        final f = File('$_remotePath$suffix');
+        if (await f.exists().timeout(_probeTimeout)) {
+          parts.add('$suffix: ${await f.length()} bytes');
+        }
+      } catch (_) {}
+    }
+    return parts.isEmpty ? '(فایل جانبی وجود ندارد)' : 'فایل‌های جانبی: ${parts.join('، ')}';
   }
 
   /// SQLITE_BUSY: another PC holds a lock right now. That is NOT "server
