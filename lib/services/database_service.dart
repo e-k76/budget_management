@@ -70,7 +70,12 @@ class DatabaseService {
   /// Bump when [_schema]/[_syncSchema]/[_migrate] change.
   static const _schemaVersion = 2;
 
-  /// How often each PC checks the shared DB's change counter.
+  /// Automatic live refresh (polling the change counter). Off by default: other
+  /// PCs pull new data when the user clicks Refresh ([refreshFromServer]).
+  @visibleForTesting
+  bool autoRefresh = false;
+
+  /// How often each PC checks the shared DB's change counter (when [autoRefresh]).
   @visibleForTesting
   Duration watchInterval = const Duration(seconds: 1);
   static const _probeTimeout = Duration(seconds: 4);
@@ -304,7 +309,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
     if (!remoteEnabled) return;
     _timer = Timer.periodic(const Duration(seconds: 10), (_) => tick());
     _watchTimer?.cancel();
-    _watchTimer = Timer.periodic(watchInterval, (_) => _watch());
+    if (autoRefresh) _watchTimer = Timer.periodic(watchInterval, (_) => _watch());
     final first = tick();
     if (waitForConnection) await first;
   }
@@ -412,6 +417,29 @@ WHERE created_by = 'Access import' AND payee IS NULL
     } finally {
       _watching = false;
     }
+  }
+
+  /// The Refresh button: pull the latest data from the shared DB.
+  ///
+  /// Reconnects with a fresh handle (so a stale view of the share is dropped),
+  /// sends any pending local changes first, mirrors the share into the local
+  /// copy, and bumps [dataVersion] so every open screen reloads. If the share is
+  /// unreachable the app keeps showing the local copy ([online] stays false).
+  Future<void> refreshFromServer() async {
+    if (_local == null) return;
+    if (remoteEnabled) {
+      final r = _remote;
+      if (r != null) {
+        _remote = null;
+        try {
+          await r.close();
+        } catch (_) {}
+      }
+      _seenRemoteVersion = null;
+      await _locked(_connectAndSync);
+    }
+    dataVersion++;
+    notifyListeners();
   }
 
   /// Manual "sync now".

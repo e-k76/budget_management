@@ -7,6 +7,7 @@ import '../core/search.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
+import '../widgets/sync_badge.dart';
 import '../services/db_status.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
@@ -116,7 +117,7 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
                 ],
                 IconButton.filledTonal(
                   tooltip: 'بروزرسانی',
-                  onPressed: _load,
+                  onPressed: () => refreshFromServer(context),
                   icon: const Icon(Icons.refresh_rounded),
                 ),
               ],

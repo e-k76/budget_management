@@ -7,6 +7,7 @@ import '../core/search.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
+import '../widgets/sync_badge.dart';
 import '../services/db_status.dart';
 import '../widgets/kpi_card.dart';
 import '../widgets/status_icons.dart';
@@ -137,7 +138,7 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
                 ],
                 IconButton.filledTonal(
                   tooltip: 'بروزرسانی',
-                  onPressed: _load,
+                  onPressed: () => refreshFromServer(context),
                   icon: const Icon(Icons.refresh_rounded),
                 ),
               ],

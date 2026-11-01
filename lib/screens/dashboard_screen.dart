@@ -9,6 +9,7 @@ import '../services/auth_service.dart';
 import '../services/report_service.dart';
 import '../widgets/charts.dart';
 import '../widgets/kpi_card.dart';
+import '../widgets/sync_badge.dart';
 import '../widgets/status_icons.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
@@ -68,7 +69,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           IconButton.filledTonal(
             tooltip: 'بروزرسانی',
-            onPressed: state.loading ? null : state.refresh,
+            onPressed: state.loading
+                ? null
+                : () async {
+                    await refreshFromServer(context);
+                    if (context.mounted) await state.refresh();
+                  },
             icon: state.loading
                 ? const SizedBox(
                     width: 18,

@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_config.dart';
 import '../services/db_status.dart';
+import 'ui_helpers.dart';
 
 /// Shows whether the shared (DFS) database is connected, how many changes are
 /// waiting to be sent to it, and lets the user retry the connection.
@@ -46,7 +47,7 @@ class SyncBadge extends StatelessWidget {
       message: tip.toString(),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: db.syncing ? null : () => context.read<DbStatus>().db.syncNow(),
+        onTap: db.syncing ? null : () => refreshFromServer(context),
         child: Padding(
           padding: const EdgeInsets.all(8),
           child: expanded
@@ -66,5 +67,15 @@ class SyncBadge extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Shared by every Refresh button: reload from the shared DB, and say so when
+/// the share can't be reached.
+Future<void> refreshFromServer(BuildContext context) async {
+  final db = context.read<DbStatus>().db;
+  await db.refreshFromServer();
+  if (context.mounted && !db.online) {
+    showSnack(context, 'سرور در دسترس نیست؛ داده‌های نسخه محلی نمایش داده می‌شود', error: true);
   }
 }

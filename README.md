@@ -39,8 +39,10 @@ git push -u origin main
 * Expenses and incomes carry a unique `uid` so rows can be matched across the two files.
 * `tool/import_access.dart` only touches the local file; the app pushes it to an empty share on the next sync.
 
-## Live sync (v1.1)
-* The shared DB has a change counter (`sync_state`, bumped by triggers on every write). Each PC checks it every second and reloads all open screens as soon as it changes, so a change made on one PC shows on the others within about a second.
-* The shared file uses the rollback journal (`journal_mode = DELETE`) instead of WAL: WAL does not work between PCs over a network share. The switch needs exclusive access, so **close the app on all PCs, then start the new version** (the first one to start converts the file; it keeps working either way).
+## Sharing changes between PCs (v1.1)
+* Every change is written to the shared DB immediately, while other PCs keep the app open (no need to close anything).
+* Other PCs pull the new data when the user clicks **Refresh** (dashboard, project, expense and income screens, or the connection badge). Refresh reconnects to the share with a fresh handle, sends any pending local changes, and reloads every open screen. If the share is down it says so and keeps showing the local copy.
+* Optional automatic refresh: the shared DB has a change counter (`sync_state`, bumped by triggers). Set `DatabaseService.autoRefresh = true` to make every PC poll it each second and reload on its own. It is off by default.
+* The shared file prefers the rollback journal (`journal_mode = DELETE`) because WAL does not work reliably between PCs over a network share. The switch needs exclusive access, so it is tried once at connect with a very short wait and skipped if other PCs are connected; it happens the next time the app starts while nobody else is connected. Everything works either way.
 * A momentary `database is locked` (another PC writing) no longer drops the app to offline mode: connect/writes retry, and only real connection failures go offline. Pending changes are kept in the local copy and sent automatically.
 * Managers can now delete expenses (admins also delete incomes).

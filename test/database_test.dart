@@ -283,6 +283,7 @@ void main() {
 
     test('live sync: a change made by another PC bumps dataVersion within a second or two', () async {
       await Directory('${tmp.path}/remote').create();
+      db.autoRefresh = true;
       db.watchInterval = const Duration(milliseconds: 200);
       await db.init(waitForConnection: true);
       expect(db.online, isTrue);
@@ -300,6 +301,30 @@ void main() {
       expect(db.dataVersion, greaterThan(before));
       expect((await db.getProjectSummaries()).any((s) => s.name == 'FromOtherPc'), isTrue);
       db.watchInterval = const Duration(seconds: 1);
+      db.autoRefresh = false;
+    });
+
+    test('Refresh button pulls another PC\'s change from the share', () async {
+      await Directory('${tmp.path}/remote').create();
+      await db.init(waitForConnection: true);
+      expect(db.online, isTrue);
+      await inRemote((d) => d.insert('projects',
+          {'name': 'FromOtherPc', 'budget_percentage': 100.0, 'total_income': 0, 'created_at': 'x'}));
+      final before = db.dataVersion;
+      await db.refreshFromServer();
+      expect(db.online, isTrue);
+      expect(db.dataVersion, greaterThan(before));
+      expect((await db.getProjectSummaries()).any((s) => s.name == 'FromOtherPc'), isTrue);
+    });
+
+    test('Refresh while the share is down keeps working from the local copy', () async {
+      await db.init(waitForConnection: true); // remote folder missing -> offline
+      await db.insertProject('Local');
+      final before = db.dataVersion;
+      await db.refreshFromServer();
+      expect(db.online, isFalse);
+      expect(db.dataVersion, greaterThan(before));
+      expect((await db.getProjectSummaries()).single.name, 'Local');
     });
 
     test('while connected, writes land in both databases', () async {
