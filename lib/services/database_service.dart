@@ -64,6 +64,12 @@ class DatabaseService {
 
   static const _opTimeout = Duration(seconds: 15);
 
+  /// Opening the shared file (first migration over SMB can be slow).
+  static const _openTimeout = Duration(seconds: 45);
+
+  /// Bump when [_schema]/[_syncSchema]/[_migrate] change.
+  static const _schemaVersion = 2;
+
   /// How often each PC checks the shared DB's change counter.
   @visibleForTesting
   Duration watchInterval = const Duration(seconds: 1);
@@ -222,29 +228,48 @@ WHERE created_by = 'Access import' AND payee IS NULL
       options: OpenDatabaseOptions(
         onConfigure: (db) async {
           // These PRAGMAs return a row, so they must go through rawQuery.
-          await db.rawQuery('PRAGMA busy_timeout = ${shared ? 10000 : 5000}');
-          if (shared) {
-            // WAL needs shared memory (-shm) that does not work between PCs over
-            // SMB/DFS, so other PCs see changes late (or not at all). The shared
-            // file uses the classic rollback journal: every commit goes straight
-            // into the main file under network locks. The PC-local copy keeps WAL.
-            try {
-              await db.rawQuery('PRAGMA journal_mode = DELETE');
-              await db.rawQuery('PRAGMA synchronous = FULL');
-            } catch (_) {
-              // Another PC still has the file open in WAL (old version): the
-              // switch happens once everyone has updated. Keep working meanwhile.
-            }
-          } else {
+          if (!shared) {
+            await db.rawQuery('PRAGMA busy_timeout = 5000');
             await db.rawQuery('PRAGMA journal_mode = WAL');
+            return;
           }
+          // WAL needs shared memory (-shm) that does not work between PCs over
+          // SMB/DFS, so other PCs see changes late (or not at all). The shared
+          // file uses the classic rollback journal: every commit goes straight
+          // into the main file under network locks. The PC-local copy keeps WAL.
+          //
+          // Switching modes needs exclusive access, which is impossible while
+          // other PCs are connected. Try ONCE with a very short wait and carry on
+          // either way, so connecting never stalls on it.
+          try {
+            await db.rawQuery('PRAGMA busy_timeout = 300');
+            final mode = (await db.rawQuery('PRAGMA journal_mode'))
+                .first
+                .values
+                .first
+                .toString()
+                .toLowerCase();
+            if (mode != 'delete') await db.rawQuery('PRAGMA journal_mode = DELETE');
+            await db.rawQuery('PRAGMA synchronous = FULL');
+          } catch (_) {
+            // Still in use by another PC (e.g. an old version): switch later.
+          }
+          await db.rawQuery('PRAGMA busy_timeout = 10000');
         },
         onOpen: (db) async {
+          // Schema/migrations need a write lock. Once the shared file has been
+          // migrated (user_version >= _schemaVersion) skip them, so connecting
+          // never queues behind other PCs' writes.
+          if (shared) {
+            final uv = (await db.rawQuery('PRAGMA user_version')).first.values.first as int;
+            if (uv >= _schemaVersion) return;
+          }
           await db.transaction((txn) async {
             for (final sql in [..._schema, ..._syncSchema]) {
               await txn.execute(sql);
             }
             await _migrate(txn);
+            await txn.execute('PRAGMA user_version = $_schemaVersion');
           });
         },
       ),
@@ -398,7 +423,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
       if (!await _remoteReachable()) return;
       for (var attempt = 0;; attempt++) {
         try {
-          _remote = await _open(_remotePath, shared: true).timeout(_opTimeout);
+          _remote = await _open(_remotePath, shared: true).timeout(_openTimeout);
           dataVersion++;
           notifyListeners();
           break;
@@ -409,7 +434,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
             await Future<void>.delayed(const Duration(seconds: 1));
             continue;
           }
-          lastError = '$e';
+          lastError = 'باز کردن پایگاه داده سرور ناموفق بود: $e';
           notifyListeners();
           return;
         }
@@ -423,6 +448,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
     if (remote == null || local == null) return;
     syncing = true;
     notifyListeners();
+    var sent = 0, total = 0;
     try {
       if (await _hasNoBusinessData(remote)) {
         // A brand-new share: publish this machine's data (incl. users).
@@ -431,12 +457,15 @@ WHERE created_by = 'Access import' AND payee IS NULL
       } else {
         if (await _meta('last_sync') == null) await _backupLocalFile();
         final ops = await local.query('pending_ops', orderBy: 'id');
+        sent = 0;
+        total = ops.length;
         for (final row in ops) {
           final data = jsonDecode(row['data'] as String) as Map<String, Object?>;
           await remote
               .transaction((txn) => _apply(txn, row['kind'] as String, data))
               .timeout(_opTimeout);
           await local.delete('pending_ops', where: 'id = ?', whereArgs: [row['id']]);
+          sent++;
         }
         await _copyAll(from: remote, to: local);
       }
@@ -445,7 +474,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
       lastError = null;
       dataVersion++;
     } catch (e) {
-      _goOffline(e);
+      _goOffline('خطا در همگام‌سازی (ارسال‌شده $sent از $total تغییر): $e');
     } finally {
       syncing = false;
       await _refreshPending();

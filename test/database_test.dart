@@ -247,6 +247,26 @@ void main() {
       expect(localMode.first.values.first.toString().toLowerCase(), 'wal');
     });
 
+    test('connects quickly even while an old-version PC holds the share open in WAL', () async {
+      await Directory('${tmp.path}/remote').create();
+      // an old client: independent connection, WAL mode, left open (and mid-read)
+      final old = await databaseFactoryFfi.openDatabase(remotePath,
+          options: OpenDatabaseOptions(singleInstance: false));
+      await old.rawQuery('PRAGMA journal_mode = WAL');
+      await old.execute('CREATE TABLE IF NOT EXISTS keepalive (x INTEGER)');
+      try {
+        final sw = Stopwatch()..start();
+        await db.init(waitForConnection: true);
+        sw.stop();
+        expect(db.online, isTrue, reason: db.lastError);
+        expect(sw.elapsed, lessThan(const Duration(seconds: 8)));
+        await db.insertProject('Alpha');
+        expect(db.pendingCount, 0);
+      } finally {
+        await old.close();
+      }
+    });
+
     test('change counter bumps on every write', () async {
       await Directory('${tmp.path}/remote').create();
       await db.init(waitForConnection: true);
