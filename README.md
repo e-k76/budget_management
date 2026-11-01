@@ -46,3 +46,6 @@ git push -u origin main
 * The shared file prefers the rollback journal (`journal_mode = DELETE`) because WAL does not work reliably between PCs over a network share. The switch needs exclusive access, so it is tried once at connect with a very short wait and skipped if other PCs are connected; it happens the next time the app starts while nobody else is connected. Everything works either way.
 * A momentary `database is locked` (another PC writing) no longer drops the app to offline mode: connect/writes retry, and only real connection failures go offline. Pending changes are kept in the local copy and sent automatically.
 * Managers can now delete expenses (admins also delete incomes).
+
+## Moving to a new shared folder
+The shared DB now lives in `...\Cost\DB\projects.db` (`AppConfig.defaultRemoteDbPath`). Create the empty `DB` folder on the share, then start the app on the PC whose local copy has the data (and any pending changes) **first**: when the shared file is new/empty the app publishes that PC's whole local database (users included, pending changes already applied) and clears its pending queue. Other PCs then connect and sync from it. To point one PC somewhere else without rebuilding, put the full path of `projects.db` on the first line of `Desktop\project_manage\server_path.txt`.

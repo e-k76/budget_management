@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:budget_management/core/app_config.dart';
 import 'package:budget_management/models/models.dart';
 import 'package:budget_management/services/auth_service.dart';
 import 'package:budget_management/services/database_service.dart';
@@ -22,6 +23,19 @@ void main() {
   tearDown(() async {
     await db.close();
     await tmp.delete(recursive: true);
+  });
+
+  test('server path: new DB folder by default, server_path.txt overrides it', () async {
+    final dir = await Directory.systemTemp.createTemp('bm_cfg');
+    addTearDown(() => dir.delete(recursive: true));
+    expect(AppConfig.defaultRemoteDbPath, endsWith(r'\Cost\DB\projects.db'));
+    final f = File('${dir.path}/server_path.txt')
+      ..writeAsStringSync('# comment\n\n  \\\\other\\share\\projects.db  \n');
+    AppConfig.loadOverrides(file: f.path);
+    expect(AppConfig.remoteDbPath, r'\\other\share\projects.db');
+    AppConfig.loadOverrides(file: '${dir.path}/missing.txt'); // no file: keeps current
+    expect(AppConfig.remoteDbPath, r'\\other\share\projects.db');
+    AppConfig.remoteDbPath = AppConfig.defaultRemoteDbPath;
   });
 
   test('managers may delete expenses; incomes stay admin-only', () {

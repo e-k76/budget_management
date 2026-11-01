@@ -14,6 +14,7 @@ import 'services/db_status.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  AppConfig.loadOverrides();
   final db = DatabaseService.instance;
   final auth = AuthService(db);
 
