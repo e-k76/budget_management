@@ -7,6 +7,7 @@ import '../core/search.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
+import '../services/db_status.dart';
 import '../widgets/charts.dart';
 import '../widgets/kpi_card.dart';
 import '../widgets/status_icons.dart';
@@ -47,10 +48,12 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  int _seenDataVersion = -1;
+
+  Future<void> _load({bool silent = false}) async {
     final state = context.read<AppState>();
     try {
-      await state.refresh();
+      await state.refresh(silent: silent);
       final e = await state.expensesOf(widget.projectName);
       final i = await state.incomesOf(widget.projectName);
       if (!mounted) return;
@@ -139,6 +142,14 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final dv = context.watch<DbStatus>().db.dataVersion;
+    if (_seenDataVersion == -1) _seenDataVersion = dv;
+    if (dv != _seenDataVersion) {
+      // Shared DB changed (another PC, or reconnect): reload quietly.
+      _seenDataVersion = dv;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => mounted ? _load(silent: true) : null);
+    }
     final user = context.watch<AuthService>().currentUser!;
     ProjectSummary? summary;
     for (final s in state.summaries) {
@@ -435,7 +446,7 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
             Text(list[i].approvedAt ?? '-'),
             _rowActions(
               canEdit: user.canEdit,
-              canDelete: user.canDelete,
+              canDelete: user.canDeleteExpense,
               onEdit: () async {
                 if (await showExpenseDialog(context, editing: list[i])) _load();
               },

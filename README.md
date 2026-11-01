@@ -38,3 +38,9 @@ git push -u origin main
 * First connection to a share that has no projects/expenses/incomes publishes this machine's data (users included). If the share already has data it wins, and the local file is first copied to `projects.db.pre-sync-<time>`.
 * Expenses and incomes carry a unique `uid` so rows can be matched across the two files.
 * `tool/import_access.dart` only touches the local file; the app pushes it to an empty share on the next sync.
+
+## Live sync (v1.1)
+* The shared DB has a change counter (`sync_state`, bumped by triggers on every write). Each PC checks it every second and reloads all open screens as soon as it changes, so a change made on one PC shows on the others within about a second.
+* The shared file uses the rollback journal (`journal_mode = DELETE`) instead of WAL: WAL does not work between PCs over a network share. The switch needs exclusive access, so **close the app on all PCs, then start the new version** (the first one to start converts the file; it keeps working either way).
+* A momentary `database is locked` (another PC writing) no longer drops the app to offline mode: connect/writes retry, and only real connection failures go offline. Pending changes are kept in the local copy and sent automatically.
+* Managers can now delete expenses (admins also delete incomes).

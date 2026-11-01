@@ -7,6 +7,7 @@ import '../core/search.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
+import '../services/db_status.dart';
 import '../widgets/kpi_card.dart';
 import '../widgets/status_icons.dart';
 import '../widgets/temp_sum.dart';
@@ -46,10 +47,12 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  int _seenDataVersion = -1;
+
+  Future<void> _load({bool silent = false}) async {
     final state = context.read<AppState>();
     try {
-      await state.refresh();
+      await state.refresh(silent: silent);
       final rows = await state.allExpenses();
       if (mounted) setState(() => _all = rows);
     } catch (e) {
@@ -90,6 +93,14 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final dv = context.watch<DbStatus>().db.dataVersion;
+    if (_seenDataVersion == -1) _seenDataVersion = dv;
+    if (dv != _seenDataVersion) {
+      // Shared DB changed (another PC, or reconnect): reload quietly.
+      _seenDataVersion = dv;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => mounted ? _load(silent: true) : null);
+    }
     final user = context.watch<AuthService>().currentUser!;
     final list = _shown;
     final total = list.fold<double>(0, (a, e) => a + e.amount);
@@ -320,7 +331,7 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
                     }
                   },
                 ),
-              if (user.canDelete)
+              if (user.canDeleteExpense)
                 IconButton(
                   tooltip: 'حذف',
                   icon: Icon(Icons.delete_outline, size: 20, color: err),

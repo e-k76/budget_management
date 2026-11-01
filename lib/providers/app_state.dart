@@ -32,10 +32,13 @@ class AppState extends ChangeNotifier {
   double get netBalance => totalIncome - totalApproved;
   double get totalBalance => summaries.fold(0, (a, s) => a + s.balance);
 
-  Future<void> refresh() async {
-    loading = true;
-    loadError = null;
-    notifyListeners();
+  /// [silent] = background reload (live sync): no loading state, no flicker.
+  Future<void> refresh({bool silent = false}) async {
+    if (!silent) {
+      loading = true;
+      loadError = null;
+      notifyListeners();
+    }
     try {
       summaries = await _db.getProjectSummaries();
       budgetPercentage = await _db.getBudgetPercentage();
@@ -102,7 +105,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> deleteExpense(Expense e) async {
-    _requireAdmin();
+    _requireEdit();
     await _db.deleteExpense(e.uid!);
     await refresh();
   }

@@ -24,6 +24,15 @@ void main() {
     await tmp.delete(recursive: true);
   });
 
+  test('managers may delete expenses; incomes stay admin-only', () {
+    AppUser u(String role) => AppUser(id: 1, username: role, fullName: role, role: role);
+    expect(u('admin').canDeleteExpense, isTrue);
+    expect(u('manager').canDeleteExpense, isTrue);
+    expect(u('viewer').canDeleteExpense, isFalse);
+    expect(u('manager').canDelete, isFalse);
+    expect(u('admin').canDelete, isTrue);
+  });
+
   group('single database', () {
     test('schema, WAL, seed admin, login', () async {
       final d = await db.db;
@@ -191,7 +200,10 @@ void main() {
 
     /// Reads the share's file through its own handle, independent of the app.
     Future<T> inRemote<T>(Future<T> Function(Database d) f) async {
-      final d = await databaseFactoryFfi.openDatabase(remotePath);
+      // singleInstance:false = an independent connection, like another PC's, so
+      // closing it cannot close the app's own handle to the same file.
+      final d = await databaseFactoryFfi.openDatabase(remotePath,
+          options: OpenDatabaseOptions(singleInstance: false));
       try {
         return await f(d);
       } finally {
@@ -221,6 +233,53 @@ void main() {
         expect(await count(d, 'projects'), 1);
         expect(await count(d, 'expenses'), 1);
       });
+    });
+
+    test('shared file uses rollback journal, local copy keeps WAL', () async {
+      await Directory('${tmp.path}/remote').create();
+      await db.init(waitForConnection: true);
+      expect(db.online, isTrue);
+      final remoteMode = await db.remoteHandle!.rawQuery('PRAGMA journal_mode');
+      expect(remoteMode.first.values.first.toString().toLowerCase(), 'delete');
+      final local = await databaseFactoryFfi.openDatabase('${tmp.path}/local/projects.db');
+      final localMode = await local.rawQuery('PRAGMA journal_mode');
+      await local.close();
+      expect(localMode.first.values.first.toString().toLowerCase(), 'wal');
+    });
+
+    test('change counter bumps on every write', () async {
+      await Directory('${tmp.path}/remote').create();
+      await db.init(waitForConnection: true);
+      Future<int> version() async => await inRemote((d) async =>
+          (await d.rawQuery('SELECT version FROM sync_state')).first['version'] as int);
+      final v0 = await version();
+      await db.insertProject('Alpha');
+      final v1 = await version();
+      expect(v1, greaterThan(v0));
+      await db.addIncome(
+          const Income(projectName: 'Alpha', amount: 5, date: '1405/01/01'), 'a');
+      expect(await version(), greaterThan(v1));
+    });
+
+    test('live sync: a change made by another PC bumps dataVersion within a second or two', () async {
+      await Directory('${tmp.path}/remote').create();
+      db.watchInterval = const Duration(milliseconds: 200);
+      await db.init(waitForConnection: true);
+      expect(db.online, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 600)); // first poll learns the baseline
+      final before = db.dataVersion;
+
+      // "another PC" writes straight into the shared file
+      await inRemote((d) => d.insert('projects',
+          {'name': 'FromOtherPc', 'budget_percentage': 100.0, 'total_income': 0, 'created_at': 'x'}));
+
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      while (db.dataVersion == before && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(db.dataVersion, greaterThan(before));
+      expect((await db.getProjectSummaries()).any((s) => s.name == 'FromOtherPc'), isTrue);
+      db.watchInterval = const Duration(seconds: 1);
     });
 
     test('while connected, writes land in both databases', () async {

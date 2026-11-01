@@ -7,6 +7,7 @@ import '../core/search.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
+import '../services/db_status.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import 'project_details_screen.dart';
@@ -37,10 +38,12 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  int _seenDataVersion = -1;
+
+  Future<void> _load({bool silent = false}) async {
     final state = context.read<AppState>();
     try {
-      await state.refresh();
+      await state.refresh(silent: silent);
       final rows = await state.allIncomes();
       if (mounted) setState(() => _all = rows);
     } catch (e) {
@@ -71,6 +74,14 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final dv = context.watch<DbStatus>().db.dataVersion;
+    if (_seenDataVersion == -1) _seenDataVersion = dv;
+    if (dv != _seenDataVersion) {
+      // Shared DB changed (another PC, or reconnect): reload quietly.
+      _seenDataVersion = dv;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => mounted ? _load(silent: true) : null);
+    }
     final user = context.watch<AuthService>().currentUser!;
     final list = _shown;
     final total = list.fold<double>(0, (a, i) => a + i.amount);

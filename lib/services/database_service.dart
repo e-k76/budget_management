@@ -63,6 +63,10 @@ class DatabaseService {
   String get _remotePath => remotePathOverride ?? AppConfig.remoteDbPath;
 
   static const _opTimeout = Duration(seconds: 15);
+
+  /// How often each PC checks the shared DB's change counter.
+  @visibleForTesting
+  Duration watchInterval = const Duration(seconds: 1);
   static const _probeTimeout = Duration(seconds: 4);
   static const _tables = ['users', 'projects', 'expenses', 'incomes', 'settings'];
 
@@ -71,7 +75,10 @@ class DatabaseService {
   Database? _local;
   Database? _remote;
   Timer? _timer;
+  Timer? _watchTimer;
   bool _ticking = false;
+  bool _watching = false;
+  int? _seenRemoteVersion;
   Future<void> _tail = Future.value();
 
   bool syncing = false;
@@ -158,6 +165,19 @@ CREATE TABLE IF NOT EXISTS sync_meta (
     'CREATE INDEX IF NOT EXISTS idx_incomes_project ON incomes(project_name)',
   ];
 
+  /// Live-sync change counter: any insert/update/delete on a data table bumps
+  /// `sync_state.version` inside the same transaction. Other PCs poll this one
+  /// row (see [_watch]) and reload as soon as it changes. Triggers live in the
+  /// database file, so they fire for every writer.
+  static final List<String> _syncSchema = [
+    'CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)',
+    'INSERT OR IGNORE INTO sync_state (id, version) VALUES (1, 0)',
+    for (final t in _tables)
+      for (final op in ['INSERT', 'UPDATE', 'DELETE'])
+        'CREATE TRIGGER IF NOT EXISTS trg_sync_${t}_${op.toLowerCase()} '
+            'AFTER $op ON $t BEGIN UPDATE sync_state SET version = version + 1 WHERE id = 1; END',
+  ];
+
   /// Upgrades databases created before a column existed.
   static Future<void> _migrate(Transaction txn) async {
     Future<bool> hasColumn(String table, String col) async =>
@@ -190,7 +210,8 @@ WHERE created_by = 'Access import' AND payee IS NULL
 
   static bool _ffiReady = false;
 
-  static Future<Database> _open(String path) async {
+  /// [shared] = the file on the network share (see journal-mode note below).
+  static Future<Database> _open(String path, {bool shared = false}) async {
     if (!_ffiReady) {
       sqfliteFfiInit();
       _ffiReady = true;
@@ -201,12 +222,26 @@ WHERE created_by = 'Access import' AND payee IS NULL
       options: OpenDatabaseOptions(
         onConfigure: (db) async {
           // These PRAGMAs return a row, so they must go through rawQuery.
-          await db.rawQuery('PRAGMA busy_timeout = 5000');
-          await db.rawQuery('PRAGMA journal_mode = WAL');
+          await db.rawQuery('PRAGMA busy_timeout = ${shared ? 10000 : 5000}');
+          if (shared) {
+            // WAL needs shared memory (-shm) that does not work between PCs over
+            // SMB/DFS, so other PCs see changes late (or not at all). The shared
+            // file uses the classic rollback journal: every commit goes straight
+            // into the main file under network locks. The PC-local copy keeps WAL.
+            try {
+              await db.rawQuery('PRAGMA journal_mode = DELETE');
+              await db.rawQuery('PRAGMA synchronous = FULL');
+            } catch (_) {
+              // Another PC still has the file open in WAL (old version): the
+              // switch happens once everyone has updated. Keep working meanwhile.
+            }
+          } else {
+            await db.rawQuery('PRAGMA journal_mode = WAL');
+          }
         },
         onOpen: (db) async {
           await db.transaction((txn) async {
-            for (final sql in _schema) {
+            for (final sql in [..._schema, ..._syncSchema]) {
               await txn.execute(sql);
             }
             await _migrate(txn);
@@ -243,6 +278,8 @@ WHERE created_by = 'Access import' AND payee IS NULL
     _timer?.cancel();
     if (!remoteEnabled) return;
     _timer = Timer.periodic(const Duration(seconds: 10), (_) => tick());
+    _watchTimer?.cancel();
+    _watchTimer = Timer.periodic(watchInterval, (_) => _watch());
     final first = tick();
     if (waitForConnection) await first;
   }
@@ -250,6 +287,8 @@ WHERE created_by = 'Access import' AND payee IS NULL
   Future<void> close() async {
     _timer?.cancel();
     _timer = null;
+    _watchTimer?.cancel();
+    _watchTimer = null;
     await _tail.catchError((_) {});
     final r = _remote, l = _local;
     _remote = null;
@@ -291,6 +330,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
   void _goOffline(Object e) {
     lastError = '$e';
     final r = _remote;
+    _seenRemoteVersion = null;
     if (r != null) {
       _remote = null;
       r.close().catchError((_) {});
@@ -314,11 +354,38 @@ WHERE created_by = 'Access import' AND payee IS NULL
           await _remote!.rawQuery('SELECT 1').timeout(_probeTimeout);
           if (pendingCount > 0) await _locked(_sync);
         } catch (e) {
-          _goOffline(e);
+          if (!_isBusy(e)) _goOffline(e);
         }
       }
     } finally {
       _ticking = false;
+    }
+  }
+
+  /// Live sync: while connected, look at the shared DB's change counter every
+  /// [watchInterval]. When another PC (or this one) changed anything, bump
+  /// [dataVersion] so every open screen reloads from the share right away.
+  Future<void> _watch() async {
+    final r = _remote;
+    if (r == null || _watching || _ticking || syncing || !remoteEnabled) return;
+    _watching = true;
+    try {
+      if (simulateUnreachable) throw StateError('share unreachable');
+      final rows = await r
+          .rawQuery('SELECT version FROM sync_state WHERE id = 1')
+          .timeout(_probeTimeout);
+      final v = rows.first['version'] as int;
+      final prev = _seenRemoteVersion;
+      _seenRemoteVersion = v;
+      if (prev != null && prev != v) {
+        dataVersion++;
+        notifyListeners();
+      }
+    } catch (e) {
+      if (_isBusy(e)) return; // locked for a moment: look again next second
+      if (identical(_remote, r)) _goOffline(e);
+    } finally {
+      _watching = false;
     }
   }
 
@@ -329,14 +396,23 @@ WHERE created_by = 'Access import' AND payee IS NULL
     if (!remoteEnabled || _local == null) return;
     if (_remote == null) {
       if (!await _remoteReachable()) return;
-      try {
-        _remote = await _open(_remotePath).timeout(_opTimeout);
-        dataVersion++;
-        notifyListeners();
-      } catch (e) {
-        lastError = '$e';
-        notifyListeners();
-        return;
+      for (var attempt = 0;; attempt++) {
+        try {
+          _remote = await _open(_remotePath, shared: true).timeout(_opTimeout);
+          dataVersion++;
+          notifyListeners();
+          break;
+        } catch (e) {
+          // The share is reachable but another PC holds a lock for a moment:
+          // try again right away instead of waiting for the next 10 s tick.
+          if (_isBusy(e) && attempt < 2) {
+            await Future<void>.delayed(const Duration(seconds: 1));
+            continue;
+          }
+          lastError = '$e';
+          notifyListeners();
+          return;
+        }
       }
     }
     await _sync();
@@ -451,6 +527,15 @@ WHERE created_by = 'Access import' AND payee IS NULL
     return f(await _ensureLocal());
   }
 
+  /// SQLITE_BUSY: another PC holds a lock right now. That is NOT "server
+  /// unreachable": retry shortly instead of dropping to offline mode.
+  static bool _isBusy(Object e) {
+    final s = e.toString();
+    return s.contains('sqlite_error: 5,') ||
+        s.contains('database is locked') ||
+        s.contains('database is busy');
+  }
+
   static bool _isConstraint(Object e) =>
       e is DatabaseException && e.toString().contains('UNIQUE');
 
@@ -461,14 +546,22 @@ WHERE created_by = 'Access import' AND payee IS NULL
 
       final remote = _remote;
       if (remote != null) {
-        try {
-          await remote
-              .transaction((txn) => _apply(txn, kind, data))
-              .timeout(_opTimeout);
-          return;
-        } catch (e) {
-          if (_isConstraint(e)) return;
-          _goOffline(e);
+        for (var attempt = 0;; attempt++) {
+          try {
+            await remote
+                .transaction((txn) => _apply(txn, kind, data))
+                .timeout(_opTimeout);
+            return;
+          } catch (e) {
+            if (_isConstraint(e)) return;
+            // Briefly locked by another PC: _apply is idempotent, so just retry.
+            if (_isBusy(e) && attempt < 3) {
+              await Future<void>.delayed(const Duration(milliseconds: 400));
+              continue;
+            }
+            _goOffline(e);
+            break;
+          }
         }
       }
       await local.insert('pending_ops', {

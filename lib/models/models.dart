@@ -19,6 +19,9 @@ class AppUser {
   bool get canEdit => role == Roles.admin || role == Roles.manager;
   bool get canDelete => isAdmin;
 
+  /// Expenses (not incomes) can also be deleted by managers.
+  bool get canDeleteExpense => canEdit;
+
   factory AppUser.fromMap(Map<String, Object?> m) => AppUser(
         id: m['id'] as int,
         username: m['username'] as String,

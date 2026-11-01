@@ -39,7 +39,7 @@ class _HomeShellState extends State<HomeShell> {
       // The data source changed (went online/offline or finished a sync).
       _seenDataVersion = db.dataVersion;
       WidgetsBinding.instance
-          .addPostFrameCallback((_) => mounted ? context.read<AppState>().refresh() : null);
+          .addPostFrameCallback((_) => mounted ? context.read<AppState>().refresh(silent: true) : null);
     }
 
     final pages = <({String label, Widget icon, Widget page})>[
