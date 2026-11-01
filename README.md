@@ -49,3 +49,12 @@ git push -u origin main
 
 ## Moving to a new shared folder
 The shared DB now lives in `...\Cost\DB\projects.db` (`AppConfig.defaultRemoteDbPath`). Create the empty `DB` folder on the share, then start the app on the PC whose local copy has the data (and any pending changes) **first**: when the shared file is new/empty the app publishes that PC's whole local database (users included, pending changes already applied) and clears its pending queue. Other PCs then connect and sync from it. To point one PC somewhere else without rebuilding, put the full path of `projects.db` on the first line of `Desktop\project_manage\server_path.txt`.
+
+## Changing the shared database without a new app version (pointer file)
+Create a text file on the server: `\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\db_path.txt` (`AppConfig.pointerFilePath`). Its first non-empty line (lines starting with `#` are ignored) is the full path of the current shared database, for example:
+
+```
+\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\DB\projects.db
+```
+Every running app re-reads this file every 10 seconds. When the path changes, each app first sends its pending changes and pulls the latest data from the old database, then switches to the new one and publishes/syncs there (if the new file is empty, the first PC that connects uploads its whole local copy). The last known path is remembered, so an offline start still uses it. A path whose folder cannot be reached is ignored (the badge/tooltip shows why), so a typo cannot cut anyone off. Save the file as UTF-8 (Notepad's default). A PC with its own `Desktop\project_manage\server_path.txt` ignores the pointer file.
+Tip before moving: have everyone click Refresh, so the switch starts from the latest data.

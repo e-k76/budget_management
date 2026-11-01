@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:budget_management/core/app_config.dart';
@@ -246,6 +247,64 @@ void main() {
       await inRemote((d) async {
         expect(await count(d, 'projects'), 1);
         expect(await count(d, 'expenses'), 1);
+      });
+    });
+
+    group('pointer file on the server', () {
+      late String pointer;
+      Future<void> writePointer(String text, {bool bom = false}) async =>
+          File(pointer).writeAsBytes([if (bom) ...[0xEF, 0xBB, 0xBF], ...utf8.encode(text)]);
+
+      setUp(() async {
+        pointer = '${tmp.path}/db_path.txt';
+        db.pointerFileOverride = pointer;
+        await Directory('${tmp.path}/remote').create();
+      });
+      tearDown(() => db.pointerFileOverride = null);
+
+      test('switches to the new database by itself and carries all data over', () async {
+        await db.init(waitForConnection: true);
+        expect(db.online, isTrue);
+        await db.insertProject('Alpha');
+        // another PC adds something to the OLD database that this PC has not pulled yet
+        await inRemote((d) => d.insert('projects',
+            {'name': 'FromOtherPc', 'budget_percentage': 100.0, 'total_income': 0, 'created_at': 'x'}));
+
+        final newDir = await Directory('${tmp.path}/newdb').create();
+        final newPath = '${newDir.path}/projects.db';
+        await writePointer('# current database\n\n  $newPath  \n', bom: true);
+        await db.tick();
+
+        expect(db.remotePath, newPath);
+        expect(db.online, isTrue, reason: db.lastError);
+        expect(db.pendingCount, 0);
+        final d = await databaseFactoryFfi.openDatabase(newPath,
+            options: OpenDatabaseOptions(singleInstance: false));
+        final names = (await d.query('projects')).map((r) => r['name']).toSet();
+        await d.close();
+        expect(names, {'Alpha', 'FromOtherPc'});
+        // new writes now go to the new database
+        await db.insertProject('Beta');
+        final d2 = await databaseFactoryFfi.openDatabase(newPath,
+            options: OpenDatabaseOptions(singleInstance: false));
+        expect((await d2.query('projects')).length, 3);
+        await d2.close();
+      });
+
+      test('an unreachable path in the file is ignored (typo cannot cut everyone off)', () async {
+        await db.init(waitForConnection: true);
+        await writePointer('${tmp.path}/no_such_folder/projects.db');
+        await db.tick();
+        expect(db.remotePath, remotePath);
+        expect(db.online, isTrue);
+        expect(db.lastError, contains('در دسترس نیست'));
+      });
+
+      test('a missing pointer file changes nothing', () async {
+        await db.init(waitForConnection: true);
+        await db.tick();
+        expect(db.remotePath, remotePath);
+        expect(db.online, isTrue);
       });
     });
 

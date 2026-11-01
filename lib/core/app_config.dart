@@ -8,6 +8,16 @@ class AppConfig {
   static const String defaultRemoteDbPath =
       r'\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\DB\projects.db';
 
+  /// Pointer file on the server: its first line is the full path of the CURRENT
+  /// shared `projects.db`. Every app re-reads it every 10 s and, when the path
+  /// changes, switches to the new database by itself (no new app version needed).
+  /// Ignored on a PC that has its own `server_path.txt` override.
+  static const String pointerFilePath =
+      r'\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\db_path.txt';
+
+  /// True when this PC has a `server_path.txt` (then the pointer file is ignored).
+  static bool hasLocalOverride = false;
+
   /// The path actually used: [defaultRemoteDbPath] unless this PC has a
   /// `server_path.txt` (see [loadOverrides]).
   static String remoteDbPath = defaultRemoteDbPath;
@@ -23,6 +33,7 @@ class AppConfig {
         final t = line.trim();
         if (t.isNotEmpty && !t.startsWith('#')) {
           remoteDbPath = t;
+          hasLocalOverride = true;
           return;
         }
       }

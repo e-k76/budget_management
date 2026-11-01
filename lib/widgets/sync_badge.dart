@@ -29,7 +29,7 @@ class SyncBadge extends StatelessWidget {
 
     final tip = StringBuffer()
       ..writeln(db.online
-          ? 'سرور: ${AppConfig.remoteDbPath}'
+          ? 'سرور: ${db.remotePath}'
           : 'سرور در دسترس نیست؛ داده‌ها از نسخه محلی خوانده می‌شود:')
       ..writeln(AppConfig.localDbPath);
     if (db.lastSync != null) tip.writeln('آخرین همگام‌سازی: ${db.lastSync}');

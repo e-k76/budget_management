@@ -60,7 +60,20 @@ class DatabaseService {
   bool simulateUnreachable = false;
 
   String get _localPath => localPathOverride ?? AppConfig.localDbPath;
-  String get _remotePath => remotePathOverride ?? AppConfig.remoteDbPath;
+  /// Set from the server's pointer file (or its cached copy); wins over the defaults.
+  String? _resolvedRemote;
+
+  /// Tests: path of a pointer file to follow (production uses [AppConfig.pointerFilePath]).
+  @visibleForTesting
+  String? pointerFileOverride;
+
+  String get _remotePath => _resolvedRemote ?? remotePathOverride ?? AppConfig.remoteDbPath;
+
+  /// The shared database currently in use (shown in the connection badge).
+  String get remotePath => _remotePath;
+
+  String? get _pointerFile => pointerFileOverride ??
+      (remotePathOverride != null || AppConfig.hasLocalOverride ? null : AppConfig.pointerFilePath);
 
   static const _opTimeout = Duration(seconds: 15);
 
@@ -304,6 +317,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
       await _ensureLocal();
       await _refreshPending();
       await _loadLastSync();
+      if (_pointerFile != null) _resolvedRemote = await _meta('remote_path'); // last known
     });
     _timer?.cancel();
     if (!remoteEnabled) return;
@@ -328,6 +342,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
     } catch (_) {}
     await l?.close();
     pendingCount = 0;
+    _resolvedRemote = null;
   }
 
   Future<T> _locked<T>(Future<T> Function() f) async {
@@ -375,6 +390,7 @@ WHERE created_by = 'Access import' AND payee IS NULL
     if (!remoteEnabled || _ticking || _local == null) return;
     _ticking = true;
     try {
+      await _checkPointer();
       if (_remote == null) {
         if (!await _remoteReachable()) return;
         await _locked(_connectAndSync);
@@ -440,6 +456,58 @@ WHERE created_by = 'Access import' AND payee IS NULL
     }
     dataVersion++;
     notifyListeners();
+  }
+
+  /// Reads the server's pointer file; if it names a different database than the
+  /// one in use, finish with the old one (send pending changes, pull its latest
+  /// data) and switch. Never switches to a location that can't be reached, so a
+  /// typo in the file can't cut everyone off the working database.
+  Future<void> _checkPointer() async {
+    final pf = _pointerFile;
+    if (pf == null || !remoteEnabled || _local == null) return;
+    String? wanted;
+    try {
+      final bytes = await File(pf).readAsBytes().timeout(_probeTimeout);
+      var text = utf8.decode(bytes, allowMalformed: true);
+      if (text.startsWith('\uFEFF')) text = text.substring(1); // Notepad's UTF-8 BOM
+      for (final line in LineSplitter.split(text)) {
+        final t = line.trim();
+        if (t.isNotEmpty && !t.startsWith('#')) {
+          wanted = t;
+          break;
+        }
+      }
+    } catch (_) {
+      return; // file missing / share down: keep using the current database
+    }
+    if (wanted == null || wanted == _remotePath) return;
+    try {
+      if (!await Directory(File(wanted).parent.path).exists().timeout(_probeTimeout)) {
+        lastError = 'مسیر جدید پایگاه داده در فایل راهنما در دسترس نیست: $wanted';
+        notifyListeners();
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+    await _locked(() async {
+      if (_remote != null) {
+        try {
+          await _sync(); // flush pending + mirror the old database into the local copy
+        } catch (_) {}
+      }
+      final r = _remote;
+      _remote = null;
+      _seenRemoteVersion = null;
+      try {
+        await r?.close();
+      } catch (_) {}
+      _resolvedRemote = wanted;
+      await _setMeta('remote_path', wanted!);
+      lastError = null;
+      dataVersion++;
+      notifyListeners();
+    });
   }
 
   /// Manual "sync now".
