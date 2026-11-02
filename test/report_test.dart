@@ -68,4 +68,19 @@ void main() {
       expect(String.fromCharCodes(b.take(4)), '%PDF');
     }
   });
+
+  test('long reports (many rows) split across pages instead of failing', () async {
+    final many = [for (var i = 0; i < 60; i++) summary('پروژه $i', income: 1e9 + i, total: 5e8, approved: 3e8)];
+    final dash = await ReportService.buildDashboardPdf(many, budgetPercentage: 100, printedBy: 'x')
+        .timeout(const Duration(seconds: 60));
+    expect(String.fromCharCodes(dash.take(4)), '%PDF');
+    final ex = [
+      for (var i = 0; i < 400; i++)
+        Expense(projectName: 'پروژه ${i % 9}', date: '1405/08/${(i % 28 + 1).toString().padLeft(2, '0')}', amount: 1e6 + i, payee: 'ایرانسل $i', description: 'توضیحات ' * 12, isApproved: i.isEven)
+    ];
+    final bytes = await ReportService.buildExpensesPdf(ex, filterNote: '', printedBy: 'x')
+        .timeout(const Duration(seconds: 120));
+    expect(String.fromCharCodes(bytes.take(4)), '%PDF');
+    expect(bytes.length, greaterThan(100000)); // many pages, not a stub
+  }, timeout: const Timeout(Duration(minutes: 3)));
 }

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -14,32 +15,26 @@ import '../models/models.dart';
 class ReportService {
   ReportService._();
 
-  /// Dana from assets if bundled, otherwise a Persian-capable system font.
-  static Future<pw.Font?> _loadFont(String asset, String systemFallback) async {
+  /// Dana from assets if bundled, otherwise a Persian-capable system font (raw bytes, so
+  /// they can be handed to the background isolate that builds the PDF).
+  static Future<Uint8List?> _fontBytes(String asset, String systemFallback) async {
     try {
-      return pw.Font.ttf(await rootBundle.load(asset));
+      final d = await rootBundle.load(asset);
+      return d.buffer.asUint8List(d.offsetInBytes, d.lengthInBytes);
     } catch (_) {}
     try {
       final f = File(systemFallback);
-      if (await f.exists()) {
-        final bytes = await f.readAsBytes();
-        return pw.Font.ttf(ByteData.view(Uint8List.fromList(bytes).buffer));
-      }
+      if (await f.exists()) return await f.readAsBytes();
     } catch (_) {}
     return null;
   }
 
   // ------------------------------------------------------------ shared builder
 
-  static Future<pw.ThemeData> _theme() async {
-    final regular = await _loadFont(
-        'assets/fonts/DanaFaNum-Regular.ttf', r'C:\Windows\Fonts\tahoma.ttf');
-    final bold = await _loadFont(
-            'assets/fonts/DanaFaNum-Bold.ttf', r'C:\Windows\Fonts\tahomabd.ttf') ??
-        regular;
-    return regular == null
-        ? pw.ThemeData()
-        : pw.ThemeData.withFont(base: regular, bold: bold);
+  static pw.ThemeData _theme(Uint8List? regular, Uint8List? bold) {
+    if (regular == null) return pw.ThemeData();
+    pw.Font font(Uint8List b) => pw.Font.ttf(ByteData.view(b.buffer, b.offsetInBytes, b.lengthInBytes));
+    return pw.ThemeData.withFont(base: font(regular), bold: font(bold ?? regular));
   }
 
   /// Numbers, amounts and dates read left-to-right even in an RTL table.
@@ -64,40 +59,41 @@ class ReportService {
 
   /// One printed table. [widths] are relative column widths in logical (RTL)
   /// order: the first column is printed on the right edge.
-  static pw.Widget _table(ReportTable t) {
+  static List<pw.Widget> _table(ReportTable t) {
     // pw.Table lays columns out left-to-right, so reverse the logical order.
     pw.TableRow row(List<String> cells,
         {bool head = false, bool footer = false, PdfColor? fill}) {
       return pw.TableRow(
+        repeat: head, // column headings reappear at the top of every page
         decoration: pw.BoxDecoration(color: fill),
         children: [for (final c in cells.reversed) _cell(c, head: head, bold: footer)],
       );
     }
 
-    return pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-      children: [
-        if (t.heading != null) ...[
-          pw.Text(t.heading!,
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 4),
-        ],
-        pw.Table(
-          border: pw.TableBorder.all(color: PdfColors.grey500, width: 0.5),
-          columnWidths: {
-            for (var i = 0; i < t.widths.length; i++)
-              i: pw.FlexColumnWidth(t.widths[t.widths.length - 1 - i]),
-          },
-          children: [
-            row(t.headers, head: true, fill: PdfColors.indigo50),
-            for (final r in t.rows) row(r),
-            for (final f in t.footers) row(f, footer: true, fill: PdfColors.grey200),
-          ],
-        ),
-        pw.SizedBox(height: 14),
+    // NOT wrapped in a Column: a Column cannot be split, so a table taller than one page
+    // made MultiPage give up ("created more than 20 pages") and the app froze.
+    // A bare pw.Table is spannable and continues on the next page.
+    return [
+      if (t.heading != null) ...[
+        pw.Text(t.heading!,
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 4),
       ],
-    );
+      pw.Table(
+        border: pw.TableBorder.all(color: PdfColors.grey500, width: 0.5),
+        columnWidths: {
+          for (var i = 0; i < t.widths.length; i++)
+            i: pw.FlexColumnWidth(t.widths[t.widths.length - 1 - i]),
+        },
+        children: [
+          row(t.headers, head: true, fill: PdfColors.indigo50),
+          for (final r in t.rows) row(r),
+          for (final f in t.footers) row(f, footer: true, fill: PdfColors.grey200),
+        ],
+      ),
+      pw.SizedBox(height: 14),
+    ];
   }
 
   static Future<Uint8List> _build({
@@ -106,12 +102,23 @@ class ReportService {
     required List<ReportTable> tables,
     String? note,
   }) async {
-    final doc = pw.Document(theme: await _theme(), title: title);
+    final regular = await _fontBytes('assets/fonts/DanaFaNum-Regular.ttf', r'C:\Windows\Fonts\tahoma.ttf');
+    final bold = await _fontBytes('assets/fonts/DanaFaNum-Bold.ttf', r'C:\Windows\Fonts\tahomabd.ttf') ?? regular;
+    final today = todayJalali();
+    // Laying out hundreds of rows takes seconds: do it off the UI thread so the window
+    // keeps responding ("Not Responding") while the report is prepared.
+    return Isolate.run(() => _render(title, subtitle, tables, note, regular, bold, today));
+  }
+
+  static Future<Uint8List> _render(String title, String subtitle, List<ReportTable> tables,
+      String? note, Uint8List? regular, Uint8List? bold, String today) async {
+    final doc = pw.Document(theme: _theme(regular, bold), title: title);
     doc.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(28),
         textDirection: pw.TextDirection.rtl,
+        maxPages: 2000, // long expense lists really can be hundreds of pages
         header: (ctx) => pw.Column(
           crossAxisAlignment: pw.CrossAxisAlignment.stretch,
           children: [
@@ -122,7 +129,7 @@ class ReportService {
                 pw.Text(AppConfig.companyName,
                     textDirection: pw.TextDirection.rtl,
                     style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-                pw.Text('تاریخ: ${todayJalali()}',
+                pw.Text('تاریخ: $today',
                     textDirection: pw.TextDirection.rtl,
                     style: const pw.TextStyle(fontSize: 11)),
               ],
@@ -144,7 +151,7 @@ class ReportService {
               style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700)),
         ),
         build: (ctx) => [
-          for (final t in tables) _table(t),
+          for (final t in tables) ..._table(t),
           if (note != null)
             pw.Text(note,
                 textDirection: pw.TextDirection.rtl,
