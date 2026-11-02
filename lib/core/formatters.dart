@@ -78,6 +78,14 @@ String formatJalali(Jalali j) =>
 
 String todayJalali() => formatJalali(Jalali.now());
 
+/// `2026-11-05T14:30:00` -> `1405/08/14 14:30` (Jalali date + local time); `-` if unreadable.
+String formatJalaliDateTime(String? iso) {
+  final d = DateTime.tryParse(iso ?? '');
+  if (d == null) return '-';
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${formatJalali(Jalali.fromDateTime(d))} ${two(d.hour)}:${two(d.minute)}';
+}
+
 /// Parses "yyyy/MM/dd" (any digit script). Returns null when invalid.
 Jalali? parseJalali(String text) {
   final m = RegExp(r'^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$')

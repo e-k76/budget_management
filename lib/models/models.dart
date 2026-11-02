@@ -173,3 +173,70 @@ class Income {
         createdAt: m['created_at'] as String?,
       );
 }
+
+
+/// A support request (bug report / suggestion) any user can send; only admins read them.
+class Ticket {
+  const Ticket({
+    this.id,
+    required this.uid,
+    required this.kind,
+    required this.subject,
+    required this.message,
+    this.status = open,
+    this.createdBy,
+    this.createdByName,
+    this.createdAt,
+    this.updatedBy,
+    this.updatedAt,
+  });
+
+  static const open = 'open';
+  static const inProgress = 'in_progress';
+  static const done = 'done';
+
+  static const kinds = {
+    'bug': 'گزارش خطا',
+    'suggestion': 'پیشنهاد / قابلیت جدید',
+    'other': 'سایر',
+  };
+  static const statuses = {
+    open: 'جدید',
+    inProgress: 'در حال بررسی',
+    done: 'انجام شد',
+  };
+  static const maxSubject = 120;
+  static const maxMessage = 4000;
+
+  final int? id;
+
+  /// Stable identity shared by the local and remote databases.
+  final String uid;
+  final String kind;
+  final String subject;
+  final String message;
+  final String status;
+  final String? createdBy; // username
+  final String? createdByName; // full name when it was sent
+  final String? createdAt;
+  final String? updatedBy;
+  final String? updatedAt;
+
+  String get kindLabel => kinds[kind] ?? kind;
+  String get statusLabel => statuses[status] ?? status;
+  bool get isDone => status == done;
+
+  factory Ticket.fromMap(Map<String, Object?> m) => Ticket(
+        id: m['id'] as int?,
+        uid: m['uid'] as String,
+        kind: (m['kind'] as String?) ?? 'other',
+        subject: (m['subject'] as String?) ?? '',
+        message: (m['message'] as String?) ?? '',
+        status: (m['status'] as String?) ?? open,
+        createdBy: m['created_by'] as String?,
+        createdByName: m['created_by_name'] as String?,
+        createdAt: m['created_at'] as String?,
+        updatedBy: m['updated_by'] as String?,
+        updatedAt: m['updated_at'] as String?,
+      );
+}

@@ -32,6 +32,9 @@ class AppState extends ChangeNotifier {
   double get netBalance => totalIncome - totalApproved;
   double get totalBalance => summaries.fold(0, (a, s) => a + s.balance);
 
+  /// Tickets not yet done (shown as a badge for admins only).
+  int openTickets = 0;
+
   /// [silent] = background reload (live sync): no loading state, no flicker.
   Future<void> refresh({bool silent = false}) async {
     if (!silent) {
@@ -48,11 +51,13 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       loadError = 'خطا در خواندن پایگاه داده: $e';
     }
+    await _refreshTicketCount();
     loading = false;
     notifyListeners();
   }
 
   void clear() {
+    openTickets = 0;
     summaries = [];
     loadError = null;
     notifyListeners();
@@ -133,4 +138,63 @@ class AppState extends ChangeNotifier {
   Future<List<Income>> incomesOf(String project) => _db.getIncomes(project);
   Future<List<Expense>> allExpenses() => _db.getAllExpenses();
   Future<List<Income>> allIncomes() => _db.getAllIncomes();
+
+  // ---------------------------------------------------------------- tickets
+
+  Future<void> _refreshTicketCount() async {
+    try {
+      openTickets =
+          (_auth.currentUser?.isAdmin ?? false) ? await _db.countOpenTickets() : 0;
+    } catch (_) {
+      // a ticket count must never break loading the dashboard
+    }
+  }
+
+  /// Any signed-in user may send a ticket.
+  Future<void> submitTicket({
+    required String kind,
+    required String subject,
+    required String message,
+  }) async {
+    final s = subject.trim(), m = message.trim();
+    if (!Ticket.kinds.containsKey(kind)) throw AuthException('نوع تیکت نامعتبر است');
+    if (s.isEmpty) throw AuthException('موضوع تیکت را وارد کنید');
+    if (m.isEmpty) throw AuthException('متن تیکت را وارد کنید');
+    if (s.length > Ticket.maxSubject) {
+      throw AuthException('موضوع حداکثر ${Ticket.maxSubject} کاراکتر باشد');
+    }
+    if (m.length > Ticket.maxMessage) {
+      throw AuthException('متن حداکثر ${Ticket.maxMessage} کاراکتر باشد');
+    }
+    final u = _user;
+    await _db.insertTicket(
+        kind: kind,
+        subject: s,
+        message: m,
+        createdBy: u.username,
+        createdByName: u.fullName);
+    await _refreshTicketCount();
+    notifyListeners();
+  }
+
+  /// Only admins can read tickets.
+  Future<List<Ticket>> tickets() async {
+    _requireAdmin();
+    return _db.getTickets();
+  }
+
+  Future<void> setTicketStatus(Ticket t, String status) async {
+    _requireAdmin();
+    if (!Ticket.statuses.containsKey(status)) throw AuthException('وضعیت نامعتبر است');
+    await _db.setTicketStatus(t.uid, status, _user.fullName);
+    await _refreshTicketCount();
+    notifyListeners();
+  }
+
+  Future<void> deleteTicket(Ticket t) async {
+    _requireAdmin();
+    await _db.deleteTicket(t.uid);
+    await _refreshTicketCount();
+    notifyListeners();
+  }
 }

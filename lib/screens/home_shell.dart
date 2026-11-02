@@ -14,6 +14,7 @@ import '../widgets/status_icons.dart';
 import 'all_expenses_screen.dart';
 import 'all_incomes_screen.dart';
 import 'dashboard_screen.dart';
+import 'tickets_screen.dart';
 import 'user_management_screen.dart';
 
 class HomeShell extends StatefulWidget {
@@ -56,6 +57,7 @@ class _HomeShellState extends State<HomeShell> {
     final auth = context.watch<AuthService>();
     final user = auth.currentUser!;
     final db = context.watch<DbStatus>().db;
+    final openTickets = context.watch<AppState>().openTickets;
     if (db.dataVersion != _seenDataVersion) {
       // The data source changed (went online/offline or finished a sync).
       _seenDataVersion = db.dataVersion;
@@ -78,6 +80,15 @@ class _HomeShellState extends State<HomeShell> {
         label: 'لیست درآمدها',
         icon: const Icon(Icons.account_balance_wallet_rounded),
         page: const AllIncomesScreen(),
+      ),
+      (
+        label: user.isAdmin ? 'تیکت‌ها' : 'ثبت تیکت',
+        icon: Badge(
+          isLabelVisible: user.isAdmin && openTickets > 0,
+          label: Text('$openTickets'),
+          child: const Icon(Icons.support_agent_rounded),
+        ),
+        page: const TicketsPage(),
       ),
       if (user.isAdmin)
         (

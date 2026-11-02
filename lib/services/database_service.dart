@@ -81,7 +81,7 @@ class DatabaseService {
   static const _openTimeout = Duration(seconds: 45);
 
   /// Bump when [_schema]/[_syncSchema]/[_migrate] change.
-  static const _schemaVersion = 2;
+  static const _schemaVersion = 3; // 3: tickets table
 
   /// Automatic live refresh (polling the change counter). Off by default: other
   /// PCs pull new data when the user clicks Refresh ([refreshFromServer]).
@@ -92,7 +92,14 @@ class DatabaseService {
   @visibleForTesting
   Duration watchInterval = const Duration(seconds: 1);
   static const _probeTimeout = Duration(seconds: 4);
-  static const _tables = ['users', 'projects', 'expenses', 'incomes', 'settings'];
+  static const _tables = [
+    'users',
+    'projects',
+    'expenses',
+    'incomes',
+    'settings',
+    'tickets',
+  ];
 
   // ------------------------------------------------------------------- state
 
@@ -164,6 +171,21 @@ CREATE TABLE IF NOT EXISTS incomes (
   uid TEXT,
   created_by TEXT,
   created_at TEXT
+)''',
+    // Support tickets any user can send; only admins can read them in the app.
+    '''
+CREATE TABLE IF NOT EXISTS tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'other',
+  subject TEXT NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_by TEXT,
+  created_by_name TEXT,
+  created_at TEXT,
+  updated_by TEXT,
+  updated_at TEXT
 )''',
     // Key/value app settings (e.g. the global budget percentage).
     '''
@@ -809,6 +831,28 @@ WHERE created_by = 'Access import' AND payee IS NULL
       case 'expense_delete':
         await x.delete('expenses', where: 'uid = ?', whereArgs: [d['uid']]);
 
+      case 'ticket_add':
+        if (await byUid('tickets') != null) return; // replay-safe
+        await x.insert('tickets', {
+          'uid': d['uid'],
+          'kind': d['kind'],
+          'subject': d['subject'],
+          'message': d['message'],
+          'status': Ticket.open,
+          'created_by': d['created_by'],
+          'created_by_name': d['created_by_name'],
+          'created_at': d['created_at'],
+        });
+      case 'ticket_status':
+        await x.update(
+          'tickets',
+          {'status': d['status'], 'updated_by': d['by'], 'updated_at': d['at']},
+          where: 'uid = ?',
+          whereArgs: [d['uid']],
+        );
+      case 'ticket_delete':
+        await x.delete('tickets', where: 'uid = ?', whereArgs: [d['uid']]);
+
       case 'income_add':
         if (await byUid('incomes') != null) return;
         await x.insert('incomes', {
@@ -968,6 +1012,42 @@ ORDER BY p.name COLLATE NOCASE
   // ------------------------------------------------------------- expenses
 
   /// Every expense / income across all projects, newest first.
+  // ------------------------------------------------------------- tickets
+
+  Future<void> insertTicket({
+    required String kind,
+    required String subject,
+    required String message,
+    required String createdBy,
+    required String createdByName,
+  }) =>
+      _mutate('ticket_add', {
+        'uid': newUid(),
+        'kind': kind,
+        'subject': subject,
+        'message': message,
+        'created_by': createdBy,
+        'created_by_name': createdByName,
+        'created_at': _now(),
+      });
+
+  Future<void> setTicketStatus(String uid, String status, String by) =>
+      _mutate('ticket_status', {'uid': uid, 'status': status, 'by': by, 'at': _now()});
+
+  Future<void> deleteTicket(String uid) => _mutate('ticket_delete', {'uid': uid});
+
+  /// Newest first.
+  Future<List<Ticket>> getTickets() => _read((d) async {
+        final rows = await d.query('tickets', orderBy: 'created_at DESC, id DESC');
+        return rows.map(Ticket.fromMap).toList();
+      });
+
+  /// Tickets not yet «انجام شد» (the admin's badge).
+  Future<int> countOpenTickets() => _read((d) async {
+        final r = await d.rawQuery("SELECT COUNT(*) AS c FROM tickets WHERE status != 'done'");
+        return (r.first['c'] as int?) ?? 0;
+      });
+
   Future<List<Expense>> getAllExpenses() => _read((d) async {
         final rows = await d.query('expenses', orderBy: 'date DESC, id DESC');
         return rows.map(Expense.fromMap).toList();
