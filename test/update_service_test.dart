@@ -118,6 +118,22 @@ void main() {
       expect(p.isWithin(tmp.path, staging), isTrue);
     });
 
+    test('a program folder the user cannot write to is refused up front, with advice', () async {
+      await fullUpdateFolder();
+      final blocker = File(p.join(tmp.path, 'not_a_folder'))..writeAsStringSync('x');
+      final s = UpdateService(
+          appDir: blocker.path, // writing "inside" a file always fails, like a protected folder
+          updateFolderOverride: updDir,
+          tempRoot: tmp.path,
+          resultFile: p.join(tmp.path, 'r.txt'));
+      final info = await svc().check();
+      await expectLater(
+          s.stage(info),
+          throwsA(isA<UpdateException>()
+              .having((e) => e.message, 'message', allOf(contains('قابل نوشتن نیست'), contains('Desktop')))));
+      expect(tmp.listSync().where((e) => p.basename(e.path).startsWith('bm_update_')), isEmpty);
+    });
+
     test('an incomplete update folder is rejected and leaves no staging folder behind', () async {
       await write(p.join(updDir, 'version.txt'), '7'); // exe missing
       await write(p.join(updDir, 'x.dll'), 'x');

@@ -154,9 +154,25 @@ class UpdateService {
 
   // ------------------------------------------------------------------- stage
 
+  /// The update replaces files in [appDir], so the signed-in user must be able to write
+  /// there. Folders directly on C:\ or under Program Files need administrator rights.
+  Future<void> ensureWritable() async {
+    final probe = File(p.join(appDir, '.bm_write_test_$pid'));
+    try {
+      await probe.writeAsString('x', flush: true);
+      await probe.delete();
+    } catch (_) {
+      throw UpdateException(
+          'پوشه برنامه برای حساب شما قابل نوشتن نیست (نیاز به دسترسی مدیر):\n$appDir\n\n'
+          'بدون نیاز به مدیر: کل پوشه برنامه را در پوشه‌ای از حساب خودتان کپی کنید '
+          '(مثلاً Desktop یا Documents) و برنامه را از همان‌جا اجرا کنید، سپس دوباره به‌روزرسانی کنید.');
+    }
+  }
+
   /// Copies the update folder to a fresh local temp folder and verifies it.
   /// Returns that folder. Nothing in the program folder is touched.
   Future<String> stage(UpdateInfo info, {void Function(int done, int total)? onProgress}) async {
+    await ensureWritable(); // fail early, before copying anything
     final staging = Directory(p.join(
         tempRoot, 'bm_update_${DateTime.now().millisecondsSinceEpoch}'));
     try {
