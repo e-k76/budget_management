@@ -303,7 +303,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w600)),
             Text(formatNumber(rows[i].income)),
             Text(formatNumber(rows[i].budgetedIncome)),
-            Text(formatNumber(rows[i].totalExpenses)),
+            // «هزینه کرد» = approved (checked) expenses only; «مانده هزینه» = still unapproved
+            Text(formatNumber(rows[i].approvedExpenses)),
             Text(formatNumber(rows[i].unapprovedExpenses)),
             Text(formatNumber(rows[i].balance),
                 style: TextStyle(
@@ -321,7 +322,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         const Text('جمع کل'),
         Text(formatNumber(state.totalIncome)),
         Text(formatNumber(state.totalBudget)),
-        Text(formatNumber(state.totalExpenses)),
+        Text(formatNumber(state.totalApproved)),
         Text(formatNumber(state.totalUnapproved)),
         Text(formatNumber(state.totalBalance)),
         const Text(''),
