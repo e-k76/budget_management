@@ -254,44 +254,50 @@ try {
 }
 ''';
 
-  /// Writes the helper next to the temp folder and starts it detached. The CALLER must then
-  /// close the database and exit the app so the files are free to be replaced.
+  /// Writes the helper script and returns the command line that runs it.
+  Future<List<String>> prepareHelper(String staging, UpdateInfo info,
+      {int? waitForPid, int retries = 15, int waitSec = 2, bool restart = true}) async {
+    final script = File(p.join(tempRoot, 'bm_apply_update.ps1'));
+    await script.writeAsBytes([0xEF, 0xBB, 0xBF, ...utf8.encode(buildScript())], flush: true);
+    return [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      script.path,
+      '-ProcId',
+      '${waitForPid ?? pid}',
+      '-AppDir',
+      appDir,
+      '-Staging',
+      staging,
+      '-Exe',
+      AppConfig.exeName,
+      '-ResultFile',
+      resultFile,
+      '-Version',
+      '${info.available}',
+      '-Retries',
+      '$retries',
+      '-WaitSec',
+      '$waitSec',
+      if (!restart) '-NoRestart',
+    ];
+  }
+
+  /// Starts the helper detached. The CALLER must then close the database and exit the app so
+  /// the files are free to be replaced.
   Future<void> apply(String staging, UpdateInfo info,
       {int? waitForPid,
       int retries = 15,
       int waitSec = 2,
       bool restart = true,
       String powershell = 'powershell.exe'}) async {
-    final script = File(p.join(tempRoot, 'bm_apply_update.ps1'));
-    await script.writeAsBytes([0xEF, 0xBB, 0xBF, ...utf8.encode(buildScript())], flush: true);
+    final args = await prepareHelper(staging, info,
+        waitForPid: waitForPid, retries: retries, waitSec: waitSec, restart: restart);
     await Process.start(
       powershell,
-      [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        script.path,
-        '-ProcId',
-        '${waitForPid ?? pid}',
-        '-AppDir',
-        appDir,
-        '-Staging',
-        staging,
-        '-Exe',
-        AppConfig.exeName,
-        '-ResultFile',
-        resultFile,
-        '-Version',
-        '${info.available}',
-        '-Retries',
-        '$retries',
-        '-WaitSec',
-        '$waitSec',
-        if (!restart) '-NoRestart',
-      ],
+      ['-WindowStyle', 'Hidden', ...args],
       mode: ProcessStartMode.detached,
     );
   }

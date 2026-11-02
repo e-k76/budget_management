@@ -18,6 +18,21 @@ void main() {
     await File(path).writeAsString(text);
   }
 
+  /// When the helper leaves no result, find out why: its log, and its own error output.
+  Future<String> diagnose(UpdateInfo info, String staging) async {
+    final log = File('${Platform.environment['TEMP']}\\budget_management_update.log');
+    final b = StringBuffer('LOG: ${log.existsSync() ? log.readAsStringSync() : '(none)'}\n');
+    try {
+      final args = await svc.prepareHelper(staging, info, waitForPid: 0, retries: 1, waitSec: 1, restart: false);
+      final r = await Process.run('powershell.exe', args).timeout(const Duration(seconds: 60));
+      b.writeln('SYNC EXIT ${r.exitCode}\nSTDOUT: ${r.stdout}\nSTDERR: ${r.stderr}');
+      b.writeln('RESULT FILE: ${File(resultFile).existsSync() ? File(resultFile).readAsStringSync() : '(none)'}');
+    } catch (e) {
+      b.writeln('diagnose failed: $e');
+    }
+    return b.toString();
+  }
+
   Future<String> readResult() async {
     for (var i = 0; i < 300; i++) {
       final f = File(resultFile);
@@ -70,7 +85,9 @@ void main() {
     final staging = await svc.stage(info);
     final app = await shortLivedApp();
     await svc.apply(staging, info, waitForPid: app.pid, retries: 2, waitSec: 1);
-    expect(await readResult(), 'ok|2');
+    final r1 = await readResult();
+    if (r1.startsWith('TIMEOUT')) fail(await diagnose(info, staging));
+    expect(r1, 'ok|2');
     File(p.join(appDir, 'a_first.txt')).readAsStringSync();
     expect(File(p.join(appDir, 'a_first.txt')).readAsStringSync(), 'NEW-A');
     expect(File(p.join(appDir, 'data', 'x.bin')).readAsStringSync(), 'NEW-X');
@@ -94,6 +111,7 @@ void main() {
     final staging = await svc.stage(info);
     await svc.apply(staging, info, waitForPid: 0, retries: 1, waitSec: 1, restart: false);
     final result = await readResult();
+    if (result.startsWith('TIMEOUT')) fail(await diagnose(info, staging));
     expect(result, startsWith('failed|'), reason: result);
     // files robocopy had already replaced are put back
     expect(File(p.join(appDir, 'a_first.txt')).readAsStringSync(), 'OLD-A');
