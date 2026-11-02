@@ -103,21 +103,40 @@ void main() {
   }, skip: skip, timeout: const Timeout(Duration(minutes: 3)));
 
   test('a failed copy restores the previous version', () async {
-    // a read-only file in the app folder that the new version wants to change
-    await write(p.join(appDir, 'locked.txt'), 'OLD-LOCKED');
-    await write(p.join(updDir, 'locked.txt'), 'NEW-LOCKED');
-    await Process.run('attrib', ['+R', p.join(appDir, 'locked.txt')]);
-    final info = await svc.check();
-    final staging = await svc.stage(info);
-    await svc.apply(staging, info, waitForPid: 0, retries: 1, waitSec: 1, restart: false);
-    final result = await readResult();
-    if (result.startsWith('TIMEOUT')) fail(await diagnose(info, staging));
-    expect(result, startsWith('failed|'), reason: result);
-    // files robocopy had already replaced are put back
-    expect(File(p.join(appDir, 'a_first.txt')).readAsStringSync(), 'OLD-A');
-    expect(File(p.join(appDir, 'data', 'x.bin')).readAsStringSync(), 'OLD-X');
-    expect(File(p.join(appDir, 'locked.txt')).readAsStringSync(), 'OLD-LOCKED');
-    expect(File(p.join(appDir, 'version.txt')).readAsStringSync().trim(), '1');
-    expect(File(p.join(appDir, 'keep_me.txt')).readAsStringSync(), 'USER FILE');
+    // A file the new version wants to replace, held open (readable, not writable) like a
+    // locked DLL: the backup still works, the copy over it fails.
+    final locked = p.join(appDir, 'locked.dll');
+    final marker = p.join(tmp.path, 'holder_ready.txt');
+    await write(locked, 'OLD-LOCKED');
+    await write(p.join(updDir, 'locked.dll'), 'NEW-LOCKED');
+    final holder = await Process.start('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      "\$f=[IO.File]::Open('$locked','Open','Read','Read'); New-Item -ItemType File -Path '$marker' | Out-Null; Start-Sleep -Seconds 180",
+    ]);
+    try {
+      for (var i = 0; i < 100 && !File(marker).existsSync(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      expect(File(marker).existsSync(), isTrue, reason: 'file holder did not start');
+
+      final info = await svc.check();
+      final staging = await svc.stage(info);
+      await svc.apply(staging, info, waitForPid: 0, retries: 1, waitSec: 1, restart: false);
+      final result = await readResult();
+      if (result.startsWith('TIMEOUT')) fail(await diagnose(info, staging));
+      expect(result, startsWith('failed|'), reason: result);
+      // files robocopy had already replaced are put back
+      expect(File(p.join(appDir, 'a_first.txt')).readAsStringSync(), 'OLD-A');
+      expect(File(p.join(appDir, 'data', 'x.bin')).readAsStringSync(), 'OLD-X');
+      // ...and files the half-finished update had added are removed again
+      expect(File(p.join(appDir, 'z_last.txt')).existsSync(), isFalse);
+      expect(File(p.join(appDir, 'data', 'brand_new.txt')).existsSync(), isFalse);
+      expect(File(locked).readAsStringSync(), 'OLD-LOCKED');
+      expect(File(p.join(appDir, 'version.txt')).readAsStringSync().trim(), '1');
+      expect(File(p.join(appDir, 'keep_me.txt')).readAsStringSync(), 'USER FILE');
+    } finally {
+      holder.kill();
+    }
   }, skip: skip, timeout: const Timeout(Duration(minutes: 3)));
 }

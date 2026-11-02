@@ -235,7 +235,8 @@ try {
   $code = $LASTEXITCODE
   if ($code -ge 8) {
     Log "copy failed ($code): restoring backup"
-    robocopy $backup $AppDir /E /IS /IT /R:5 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    # mirror = also remove files the half-finished update had added
+    robocopy $backup $AppDir /MIR /IS /IT /R:5 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
     Result "failed|copy failed (robocopy $code); the previous version was restored"
   } else {
     Log "copy ok ($code)"
@@ -295,11 +296,16 @@ try {
       String powershell = 'powershell.exe'}) async {
     final args = await prepareHelper(staging, info,
         waitForPid: waitForPid, retries: retries, waitSec: waitSec, restart: restart);
-    await Process.start(
-      powershell,
-      ['-WindowStyle', 'Hidden', ...args],
-      mode: ProcessStartMode.detached,
-    );
+    final helper = ['-WindowStyle', 'Hidden', ...args];
+    if (Platform.isWindows) {
+      // Started directly (even "detached") PowerShell never ran its script from a Dart
+      // process on Windows (verified on a Windows runner); going through `cmd /c start`
+      // gives it its own hidden console and it outlives this app.
+      await Process.start('cmd.exe', ['/c', 'start', '', '/min', powershell, ...helper],
+          mode: ProcessStartMode.detached);
+    } else {
+      await Process.start(powershell, helper, mode: ProcessStartMode.detached);
+    }
   }
 
   // ------------------------------------------------------------ last result
