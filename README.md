@@ -65,3 +65,6 @@ In the dashboard and project reports the column «هزینه کرد کلی» cou
 
 ## Search by date range
 The expense list, income list and each project page have «از تاریخ / تا تاریخ» boxes (type a Jalali date or use the calendar; the calendar-range button offers this month / last month / last 30 days / this year; ✕ clears). Both ends are inclusive and either can be left empty. It combines with the other search/filters, the totals and counts follow it, and the printed report uses the same range (shown in its header). On a project page one range applies to both the expenses and incomes tabs. Rows whose date cannot be read are hidden while a range is active.
+
+## Sorting by date
+In the expense list and in a project's expenses tab, click the «تاریخ» column header to flip between newest first (default, ↓) and oldest first (↑). Sorting uses the real calendar date (so `1405/9/1` comes before `1405/10/1` even if stored without zero padding); same-day rows stay in entry order and unreadable dates go last. The printed expense report uses the same order. The sort order is per screen and resets when the screen is reopened.

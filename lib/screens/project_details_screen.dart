@@ -18,6 +18,7 @@ import 'entry_dialogs.dart';
 import '../services/report_service.dart';
 import '../core/date_range.dart';
 import '../widgets/date_range_filter.dart';
+import '../core/sorting.dart';
 
 class ProjectDetailsScreen extends StatefulWidget {
   const ProjectDetailsScreen({super.key, required this.projectName});
@@ -40,6 +41,9 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
 
   // Date range shared by the expenses and incomes tabs (and the printout).
   DateRange _range = const DateRange();
+
+  /// Date order of the expenses table (and the printout): newest first by default.
+  bool _dateAscending = false;
   final Set<String> _picked = {};
 
   @override
@@ -88,8 +92,8 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
 
   // ---------------------------------------------------------------- search
 
-  List<Expense> get _shownExpenses => _expenses
-      .where((e) => _approval.allows(e.isApproved) &&
+  List<Expense> get _shownExpenses => sortByDate(
+      _expenses.where((e) => _approval.allows(e.isApproved) &&
           _range.contains(e.date) &&
           matchesQuery([
             e.payee,
@@ -99,8 +103,10 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
             e.approvedBy ?? '',
             e.createdBy ?? '',
             e.amount.round().toString(),
-          ], _expenseSearch.text))
-      .toList();
+          ], _expenseSearch.text)),
+      date: (e) => e.date,
+      id: (e) => e.id ?? 0,
+      ascending: _dateAscending);
 
   List<Income> get _shownIncomes => _incomes
       .where((i) => _range.contains(i.date) &&
@@ -439,9 +445,12 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
 
   Widget _expensesTable(List<Expense> list, AppState state, AppUser user) {
     return PinnedTable(
+      sortColumn: 1,
+      sortAscending: _dateAscending,
+      onSort: (_) => setState(() => _dateAscending = !_dateAscending),
       columns: const [
         PinnedColumn('ردیف', flex: 1, minWidth: 56),
-        PinnedColumn('تاریخ', flex: 2, minWidth: 110),
+        PinnedColumn('تاریخ', flex: 2, minWidth: 110, sortable: true),
         PinnedColumn('مبلغ', flex: 3, minWidth: 140),
         PinnedColumn('در وجه', flex: 3, minWidth: 150),
         PinnedColumn('شرح', flex: 4, minWidth: 200),

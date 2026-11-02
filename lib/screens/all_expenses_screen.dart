@@ -18,6 +18,7 @@ import 'project_details_screen.dart';
 import '../services/report_service.dart';
 import '../core/date_range.dart';
 import '../widgets/date_range_filter.dart';
+import '../core/sorting.dart';
 
 enum _Status { all, approved, unapproved }
 
@@ -36,6 +37,9 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
   String? _project;
   _Status _status = _Status.all;
   DateRange _range = const DateRange();
+
+  /// Date order of the list (and of the printout): newest first by default.
+  bool _dateAscending = false;
 
   // Amounts clicked into the temporary sum (by expense uid).
   final Set<String> _picked = {};
@@ -95,7 +99,8 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
     }
   }
 
-  List<Expense> get _shown => _all.where((e) {
+  List<Expense> get _shown => sortByDate(
+      _all.where((e) {
         if (_project != null && e.projectName != _project) return false;
         if (!_range.contains(e.date)) return false;
         if (_status == _Status.approved && !e.isApproved) return false;
@@ -110,7 +115,10 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
           e.createdBy ?? '',
           e.amount.round().toString(),
         ], _search.text);
-      }).toList();
+      }),
+      date: (e) => e.date,
+      id: (e) => e.id ?? 0,
+      ascending: _dateAscending);
 
   @override
   Widget build(BuildContext context) {
@@ -301,9 +309,12 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
       List<Expense> list, double total, AppState state, AppUser user) {
     final err = Theme.of(context).colorScheme.error;
     return PinnedTable(
+      sortColumn: 1,
+      sortAscending: _dateAscending,
+      onSort: (_) => setState(() => _dateAscending = !_dateAscending),
       columns: const [
         PinnedColumn('ردیف', flex: 1, minWidth: 56),
-        PinnedColumn('تاریخ', flex: 2, minWidth: 110),
+        PinnedColumn('تاریخ', flex: 2, minWidth: 110, sortable: true),
         PinnedColumn('پروژه', flex: 3, minWidth: 150),
         PinnedColumn('مبلغ', flex: 3, minWidth: 140),
         PinnedColumn('در وجه', flex: 3, minWidth: 150),

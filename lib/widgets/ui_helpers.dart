@@ -104,8 +104,12 @@ class ScrollableTable extends StatelessWidget {
 }
 
 class PinnedColumn {
-  const PinnedColumn(this.label, {this.flex = 1, this.minWidth = 100});
+  const PinnedColumn(this.label,
+      {this.flex = 1, this.minWidth = 100, this.sortable = false});
   final String label;
+
+  /// Header can be clicked to sort by this column (see [PinnedTable.onSort]).
+  final bool sortable;
   final int flex;
   final double minWidth;
 }
@@ -120,7 +124,15 @@ class PinnedTable extends StatelessWidget {
     this.footer,
     this.onRowTap,
     this.rowHeight = 52,
+    this.sortColumn,
+    this.sortAscending = true,
+    this.onSort,
   });
+
+  /// Column currently sorted (shows an arrow), its direction, and the click handler.
+  final int? sortColumn;
+  final bool sortAscending;
+  final void Function(int column)? onSort;
 
   final List<PinnedColumn> columns;
   final List<List<Widget>> rows;
@@ -178,7 +190,34 @@ class PinnedTable extends StatelessWidget {
           child: Column(
             children: [
               line(
-                [for (final col in columns) Text(col.label)],
+                [
+                  for (var i = 0; i < columns.length; i++)
+                    if (columns[i].sortable && onSort != null)
+                      Tooltip(
+                        message: 'مرتب‌سازی بر اساس ${columns[i].label}',
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () => onSort!(i),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(columns[i].label),
+                              const SizedBox(width: 2),
+                              Icon(
+                                sortColumn == i
+                                    ? (sortAscending
+                                        ? Icons.arrow_upward_rounded
+                                        : Icons.arrow_downward_rounded)
+                                    : Icons.unfold_more_rounded,
+                                size: 16,
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    else
+                      Text(columns[i].label),
+                ],
                 color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
