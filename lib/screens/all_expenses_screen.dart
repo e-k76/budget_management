@@ -15,6 +15,7 @@ import '../widgets/temp_sum.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import 'project_details_screen.dart';
+import '../services/report_service.dart';
 
 enum _Status { all, approved, unapproved }
 
@@ -74,6 +75,21 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
   Iterable<Expense> get _pickedRows => _all.where((e) => _picked.contains(e.uid));
   int get _pickedCount => _pickedRows.length;
   double get _pickedTotal => _pickedRows.fold<double>(0, (a, e) => a + e.amount);
+
+  Future<void> _print(String user) async {
+    final notes = <String>[
+      if (_project != null) 'پروژه: $_project',
+      if (_status != _Status.all)
+        'وضعیت: ${_status == _Status.approved ? 'تاییدشده' : 'تاییدنشده'}',
+      if (_search.text.trim().isNotEmpty) 'جستجو: «${_search.text.trim()}»',
+    ];
+    try {
+      await ReportService.printExpenses(_shown,
+          filterNote: notes.isEmpty ? '' : 'فیلتر: ${notes.join('؛ ')}', printedBy: user);
+    } catch (e) {
+      if (mounted) showSnack(context, 'خطا در تهیه گزارش: $e', error: true);
+    }
+  }
 
   List<Expense> get _shown => _all.where((e) {
         if (_project != null && e.projectName != _project) return false;
@@ -136,6 +152,12 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
                   ),
                   const SizedBox(width: 10),
                 ],
+                OutlinedButton.icon(
+                  onPressed: () => _print(user.fullName),
+                  icon: const Icon(Icons.print_outlined),
+                  label: const Text('پرینت / خروجی چاپی'),
+                ),
+                const SizedBox(width: 10),
                 IconButton.filledTonal(
                   tooltip: 'بروزرسانی',
                   onPressed: () => refreshFromServer(context),

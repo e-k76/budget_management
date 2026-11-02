@@ -58,3 +58,7 @@ Create a text file on the server: `\\dfs\Moasese Samavat\مدیریت فنی و 
 ```
 Every running app re-reads this file every 10 seconds. When the path changes, each app first sends its pending changes and pulls the latest data from the old database, then switches to the new one and publishes/syncs there (if the new file is empty, the first PC that connects uploads its whole local copy). The last known path is remembered, so an offline start still uses it. A path whose folder cannot be reached is ignored (the badge/tooltip shows why), so a typo cannot cut anyone off. Save the file as UTF-8 (Notepad's default). A PC with its own `Desktop\project_manage\server_path.txt` ignores the pointer file.
 Tip before moving: have everyone click Refresh, so the switch starts from the latest data.
+
+## Printing / exporting (PDF, A4 landscape)
+Button «پرینت / خروجی چاپی» on: the dashboard (all projects), each project page (summary + expenses + incomes), the expense list and the income list. The print preview lets you print or save as PDF. Project page and lists export exactly what is shown (search and filters applied, noted in the report header).
+In the dashboard and project reports the column «هزینه کرد کلی» counts **only approved (checked) expenses**; «مانده هزینه» = unapproved expenses; «تراز کلی» = budget − approved expenses. Expense reports list every row with its approval status and totals for all / approved / unapproved.

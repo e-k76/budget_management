@@ -15,6 +15,7 @@ import '../widgets/status_icons.dart';
 import '../widgets/temp_sum.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
+import '../services/report_service.dart';
 
 class ProjectDetailsScreen extends StatefulWidget {
   const ProjectDetailsScreen({super.key, required this.projectName});
@@ -238,6 +239,26 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
     );
   }
 
+  /// Prints/exports this project: summary + the expenses and incomes currently
+  /// shown (search / approval filters applied).
+  Future<void> _print(ProjectSummary s, AppUser user) async {
+    final notes = <String>[
+      if (_approval != ApprovalFilter.all)
+        'وضعیت تایید: ${_approval == ApprovalFilter.approved ? 'تاییدشده' : 'تاییدنشده'}',
+      if (_expenseSearch.text.trim().isNotEmpty) 'جستجوی هزینه: «${_expenseSearch.text.trim()}»',
+      if (_incomeSearch.text.trim().isNotEmpty) 'جستجوی درآمد: «${_incomeSearch.text.trim()}»',
+    ];
+    try {
+      await ReportService.printProject(s,
+          expenses: _shownExpenses,
+          incomes: _shownIncomes,
+          filterNote: notes.isEmpty ? '' : 'فیلتر: ${notes.join('؛ ')}',
+          printedBy: user.fullName);
+    } catch (e) {
+      if (mounted) showSnack(context, 'خطا در تهیه گزارش: $e', error: true);
+    }
+  }
+
   Widget _actions(BuildContext context, AppUser user, ProjectSummary s) {
     return Wrap(
       spacing: 10,
@@ -260,6 +281,11 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
             label: const Text('افزایش درآمد'),
           ),
         ],
+        OutlinedButton.icon(
+          onPressed: () => _print(s, user),
+          icon: const Icon(Icons.print_outlined),
+          label: const Text('پرینت / خروجی چاپی'),
+        ),
       ],
     );
   }

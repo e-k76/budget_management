@@ -12,6 +12,7 @@ import '../services/db_status.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import 'project_details_screen.dart';
+import '../services/report_service.dart';
 
 /// Every income of every project, with search and a project filter.
 class AllIncomesScreen extends StatefulWidget {
@@ -59,6 +60,19 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
       await _load();
     } catch (e) {
       if (mounted) showSnack(context, '$e', error: true);
+    }
+  }
+
+  Future<void> _print(String user) async {
+    final notes = <String>[
+      if (_project != null) 'پروژه: $_project',
+      if (_search.text.trim().isNotEmpty) 'جستجو: «${_search.text.trim()}»',
+    ];
+    try {
+      await ReportService.printIncomes(_shown,
+          filterNote: notes.isEmpty ? '' : 'فیلتر: ${notes.join('؛ ')}', printedBy: user);
+    } catch (e) {
+      if (mounted) showSnack(context, 'خطا در تهیه گزارش: $e', error: true);
     }
   }
 
@@ -115,6 +129,12 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
                   ),
                   const SizedBox(width: 10),
                 ],
+                OutlinedButton.icon(
+                  onPressed: () => _print(user.fullName),
+                  icon: const Icon(Icons.print_outlined),
+                  label: const Text('پرینت / خروجی چاپی'),
+                ),
+                const SizedBox(width: 10),
                 IconButton.filledTonal(
                   tooltip: 'بروزرسانی',
                   onPressed: () => refreshFromServer(context),
