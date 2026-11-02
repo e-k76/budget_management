@@ -16,6 +16,8 @@ import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import 'project_details_screen.dart';
 import '../services/report_service.dart';
+import '../core/date_range.dart';
+import '../widgets/date_range_filter.dart';
 
 enum _Status { all, approved, unapproved }
 
@@ -33,6 +35,7 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
   final _search = TextEditingController();
   String? _project;
   _Status _status = _Status.all;
+  DateRange _range = const DateRange();
 
   // Amounts clicked into the temporary sum (by expense uid).
   final Set<String> _picked = {};
@@ -81,6 +84,7 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
       if (_project != null) 'پروژه: $_project',
       if (_status != _Status.all)
         'وضعیت: ${_status == _Status.approved ? 'تاییدشده' : 'تاییدنشده'}',
+      if (_range.isActive) _range.describe(),
       if (_search.text.trim().isNotEmpty) 'جستجو: «${_search.text.trim()}»',
     ];
     try {
@@ -93,6 +97,7 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
 
   List<Expense> get _shown => _all.where((e) {
         if (_project != null && e.projectName != _project) return false;
+        if (!_range.contains(e.date)) return false;
         if (_status == _Status.approved && !e.isApproved) return false;
         if (_status == _Status.unapproved && e.isApproved) return false;
         return matchesQuery([
@@ -221,6 +226,8 @@ class _AllExpensesScreenState extends State<AllExpensesScreen> {
                     onChanged: (v) => setState(() => _status = v ?? _status),
                   ),
                 ),
+                DateRangeFilter(
+                    range: _range, onChanged: (r) => setState(() => _range = r)),
                 Text('${list.length} از ${_all.length} مورد',
                     style: TextStyle(color: Theme.of(context).hintColor)),
               ],

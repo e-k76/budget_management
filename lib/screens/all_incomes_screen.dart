@@ -13,6 +13,8 @@ import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import 'project_details_screen.dart';
 import '../services/report_service.dart';
+import '../core/date_range.dart';
+import '../widgets/date_range_filter.dart';
 
 /// Every income of every project, with search and a project filter.
 class AllIncomesScreen extends StatefulWidget {
@@ -27,6 +29,7 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
   bool _loading = true;
   final _search = TextEditingController();
   String? _project;
+  DateRange _range = const DateRange();
 
   @override
   void initState() {
@@ -66,6 +69,7 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
   Future<void> _print(String user) async {
     final notes = <String>[
       if (_project != null) 'پروژه: $_project',
+      if (_range.isActive) _range.describe(),
       if (_search.text.trim().isNotEmpty) 'جستجو: «${_search.text.trim()}»',
     ];
     try {
@@ -78,6 +82,7 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
 
   List<Income> get _shown => _all.where((i) {
         if (_project != null && i.projectName != _project) return false;
+        if (!_range.contains(i.date)) return false;
         return matchesQuery([
           i.projectName,
           i.date,
@@ -182,6 +187,8 @@ class _AllIncomesScreenState extends State<AllIncomesScreen> {
                     onChanged: (v) => setState(() => _project = v),
                   ),
                 ),
+                DateRangeFilter(
+                    range: _range, onChanged: (r) => setState(() => _range = r)),
                 Text('${list.length} از ${_all.length} مورد',
                     style: TextStyle(color: Theme.of(context).hintColor)),
               ],

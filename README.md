@@ -62,3 +62,6 @@ Tip before moving: have everyone click Refresh, so the switch starts from the la
 ## Printing / exporting (PDF, A4 landscape)
 Button «پرینت / خروجی چاپی» on: the dashboard (all projects), each project page (summary + expenses + incomes), the expense list and the income list. The print preview lets you print or save as PDF. Project page and lists export exactly what is shown (search and filters applied, noted in the report header).
 In the dashboard and project reports the column «هزینه کرد کلی» counts **only approved (checked) expenses**; «مانده هزینه» = unapproved expenses; «تراز کلی» = budget − approved expenses. Expense reports list every row with its approval status and totals for all / approved / unapproved.
+
+## Search by date range
+The expense list, income list and each project page have «از تاریخ / تا تاریخ» boxes (type a Jalali date or use the calendar; the calendar-range button offers this month / last month / last 30 days / this year; ✕ clears). Both ends are inclusive and either can be left empty. It combines with the other search/filters, the totals and counts follow it, and the printed report uses the same range (shown in its header). On a project page one range applies to both the expenses and incomes tabs. Rows whose date cannot be read are hidden while a range is active.

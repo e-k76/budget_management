@@ -82,6 +82,13 @@ class PercentField extends StatelessWidget {
   }
 }
 
+/// Calendar dialog; null when cancelled.
+Future<Jalali?> pickJalaliDate(BuildContext context, Jalali initial) =>
+    showDialog<Jalali>(
+      context: context,
+      builder: (_) => _JalaliPickerDialog(initial: initial),
+    );
+
 class JalaliDateField extends StatelessWidget {
   const JalaliDateField({
     super.key,
@@ -93,11 +100,7 @@ class JalaliDateField extends StatelessWidget {
   final String label;
 
   Future<void> _pick(BuildContext context) async {
-    final initial = parseJalali(controller.text) ?? Jalali.now();
-    final picked = await showDialog<Jalali>(
-      context: context,
-      builder: (_) => _JalaliPickerDialog(initial: initial),
-    );
+    final picked = await pickJalaliDate(context, parseJalali(controller.text) ?? Jalali.now());
     if (picked != null) controller.text = formatJalali(picked);
   }
 

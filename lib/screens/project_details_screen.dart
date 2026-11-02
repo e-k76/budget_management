@@ -16,6 +16,8 @@ import '../widgets/temp_sum.dart';
 import '../widgets/ui_helpers.dart';
 import 'entry_dialogs.dart';
 import '../services/report_service.dart';
+import '../core/date_range.dart';
+import '../widgets/date_range_filter.dart';
 
 class ProjectDetailsScreen extends StatefulWidget {
   const ProjectDetailsScreen({super.key, required this.projectName});
@@ -35,6 +37,9 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
 
   // Expenses tab: approval filter and the amounts clicked into the temp sum.
   ApprovalFilter _approval = ApprovalFilter.all;
+
+  // Date range shared by the expenses and incomes tabs (and the printout).
+  DateRange _range = const DateRange();
   final Set<String> _picked = {};
 
   @override
@@ -85,6 +90,7 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
 
   List<Expense> get _shownExpenses => _expenses
       .where((e) => _approval.allows(e.isApproved) &&
+          _range.contains(e.date) &&
           matchesQuery([
             e.payee,
             e.description,
@@ -97,7 +103,8 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
       .toList();
 
   List<Income> get _shownIncomes => _incomes
-      .where((i) => matchesQuery([
+      .where((i) => _range.contains(i.date) &&
+          matchesQuery([
             i.date,
             i.createdBy ?? '',
             i.amount.round().toString(),
@@ -246,6 +253,7 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
       if (_approval != ApprovalFilter.all)
         'وضعیت تایید: ${_approval == ApprovalFilter.approved ? 'تاییدشده' : 'تاییدنشده'}',
       if (_expenseSearch.text.trim().isNotEmpty) 'جستجوی هزینه: «${_expenseSearch.text.trim()}»',
+      if (_range.isActive) _range.describe(),
       if (_incomeSearch.text.trim().isNotEmpty) 'جستجوی درآمد: «${_incomeSearch.text.trim()}»',
     ];
     try {
@@ -409,6 +417,8 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
             ApprovalFilterField(
                 value: _approval,
                 onChanged: (v) => setState(() => _approval = v)),
+            DateRangeFilter(
+                range: _range, onChanged: (r) => setState(() => _range = r)),
           ],
         ),
         TempSumBar(
@@ -495,7 +505,10 @@ class _ProjectDetailsScreenState extends State<ProjectDetailsScreen> {
     return Column(
       children: [
         _searchBar(_incomeSearch, 'جستجو در تاریخ، مبلغ، ثبت‌کننده', list.length,
-            _incomes.length),
+            _incomes.length, extra: [
+          DateRangeFilter(
+              range: _range, onChanged: (r) => setState(() => _range = r)),
+        ]),
         Expanded(
           child: _incomes.isEmpty
               ? _empty('درآمدی ثبت نشده است.')
