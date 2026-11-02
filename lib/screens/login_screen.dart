@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_config.dart';
 import '../services/auth_service.dart';
+import '../services/credential_store.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -17,7 +18,25 @@ class _LoginScreenState extends State<LoginScreen> {
   final _pass = TextEditingController();
   bool _busy = false;
   bool _obscure = true;
+  bool _remember = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSaved();
+  }
+
+  /// Pre-fill the form with the login remembered on this PC (if any).
+  Future<void> _loadSaved() async {
+    final saved = await context.read<CredentialStore>().load();
+    if (saved == null || !mounted) return;
+    setState(() {
+      _user.text = saved.username;
+      _pass.text = saved.password;
+      _remember = true;
+    });
+  }
 
   @override
   void dispose() {
@@ -32,9 +51,18 @@ class _LoginScreenState extends State<LoginScreen> {
       _busy = true;
       _error = null;
     });
+    final store = context.read<CredentialStore>();
+    final username = _user.text.trim(), password = _pass.text, remember = _remember;
     try {
-      final ok = await context.read<AuthService>().login(_user.text, _pass.text);
-      if (!ok && mounted) {
+      final ok = await context.read<AuthService>().login(username, password);
+      if (ok) {
+        // Only a login that worked is remembered; unchecking forgets it.
+        if (remember) {
+          await store.save(username, password);
+        } else {
+          await store.clear();
+        }
+      } else if (mounted) {
         setState(() => _error = 'نام کاربری یا رمز عبور اشتباه است');
       }
     } catch (e) {
@@ -120,6 +148,20 @@ class _LoginScreenState extends State<LoginScreen> {
                               ? 'رمز عبور را وارد کنید'
                               : null,
                           onFieldSubmitted: (_) => _submit(),
+                        ),
+                        const SizedBox(height: 6),
+                        CheckboxListTile(
+                          value: _remember,
+                          onChanged: _busy
+                              ? null
+                              : (v) => setState(() => _remember = v ?? false),
+                          title: const Text('ذخیره نام کاربری و رمز عبور'),
+                          subtitle: const Text(
+                              'روی همین رایانه و فقط برای حساب ویندوز شما ذخیره می‌شود',
+                              style: TextStyle(fontSize: 11)),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
                         ),
                         if (_error != null) ...[
                           const SizedBox(height: 12),

@@ -46,6 +46,13 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   meta: ^1.19.0
+  # Remembered login (encrypted with the Windows user account, not plain text)
+  flutter_secure_storage: ^9.2.4
+
+# path_provider_android >= 2.3 drags in the `jni` Java bridge, whose Windows
+# build needs a JDK. The app is Windows-only, so stay on the last version without it.
+dependency_overrides:
+  path_provider_android: '>=2.2.0 <2.3.0'
 
 dev_dependencies:
   flutter_test:

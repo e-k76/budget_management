@@ -68,3 +68,6 @@ The expense list, income list and each project page have «از تاریخ / ت�
 
 ## Sorting by date
 In the expense list and in a project's expenses tab, click the «تاریخ» column header to flip between newest first (default, ↓) and oldest first (↑). Sorting uses the real calendar date (so `1405/9/1` comes before `1405/10/1` even if stored without zero padding); same-day rows stay in entry order and unreadable dates go last. The printed expense report uses the same order. The sort order is per screen and resets when the screen is reopened.
+
+## Remember login
+The login screen has «ذخیره نام کاربری و رمز عبور». Tick it and log in: the username and password are saved on this PC (encrypted with the Windows user account via `flutter_secure_storage`, not plain text) and pre-fill the form next time (no auto-login, so logging out and switching user still works). A wrong password is never saved; unticking the box and logging in forgets the saved login. If the password is changed later, the old saved one fails once — log in with the new one to update it. `path_provider_android` is pinned below 2.3 in `pubspec.yaml` so the `jni` Java bridge (needs a JDK on Windows) is not pulled in.
