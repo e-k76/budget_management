@@ -25,8 +25,27 @@ jobs:
       # Runs the whole suite on Windows, including the in-app updater's real
       # PowerShell helper. Failures show up as annotations on this job.
       - name: Tests (Windows)
+        id: tests
         continue-on-error: true
-        run: flutter test --reporter github
+        shell: pwsh
+        run: |
+          flutter test --reporter expanded 2>&1 | Tee-Object -FilePath test_output.txt
+          exit $LASTEXITCODE
+
+      # Surface each failing test (and its output) as an annotation on this job.
+      - name: Report test failures
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Test-Path test_output.txt)) { exit 0 }
+          $lines = Get-Content test_output.txt
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '\[E\]') {
+              $end = [Math]::Min($i + 25, $lines.Count - 1)
+              $msg = ($lines[$i..$end] -join "`n").Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+              Write-Host "::error title=Windows test failed::$msg"
+            }
+          }
 
       - run: flutter build windows --release
 
