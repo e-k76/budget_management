@@ -5,6 +5,10 @@ import '../core/app_config.dart';
 import '../providers/app_state.dart';
 import '../services/auth_service.dart';
 import '../services/db_status.dart';
+import '../services/update_service.dart';
+import '../services/update_status.dart';
+import '../widgets/ui_helpers.dart';
+import '../widgets/update_button.dart';
 import '../widgets/sync_badge.dart';
 import '../widgets/status_icons.dart';
 import 'all_expenses_screen.dart';
@@ -28,6 +32,23 @@ class _HomeShellState extends State<HomeShell> {
     super.initState();
     WidgetsBinding.instance
         .addPostFrameCallback((_) => context.read<AppState>().refresh());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateStartup());
+  }
+
+  /// On start: tell the user how the last update went, then look for a new version.
+  Future<void> _updateStartup() async {
+    final service = context.read<UpdateService>();
+    final status = context.read<UpdateStatus>();
+    final last = await service.takeLastResult();
+    if (last != null && mounted) {
+      showSnack(
+          context,
+          last.$1
+              ? 'برنامه با موفقیت به نسخه ${last.$2} به‌روزرسانی شد.'
+              : 'به‌روزرسانی انجام نشد: ${last.$2}',
+          error: !last.$1);
+    }
+    await status.check();
   }
 
   @override
@@ -99,6 +120,7 @@ class _HomeShellState extends State<HomeShell> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      UpdateButton(expanded: wide),
                       SyncBadge(expanded: wide),
                       const SizedBox(height: 8),
                       if (wide) ...[

@@ -15,6 +15,20 @@ class AppConfig {
   static const String pointerFilePath =
       r'\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\db_path.txt';
 
+  /// The program's executable (what the in-app updater restarts).
+  static const String exeName = 'budget_management.exe';
+
+  /// Folder on the server that holds the NEW version of the program (the
+  /// unzipped build + its `version.txt`). The «به‌روزرسانی برنامه» button copies
+  /// it over this PC's program folder.
+  static const String defaultUpdateFolder =
+      r'\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\App_Update';
+
+  /// Optional pointer file naming a different update folder (first line), like
+  /// [pointerFilePath] does for the database.
+  static const String updatePointerFilePath =
+      r'\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\update_path.txt';
+
   /// True when this PC has a `server_path.txt` (then the pointer file is ignored).
   static bool hasLocalOverride = false;
 

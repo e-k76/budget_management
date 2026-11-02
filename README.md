@@ -71,3 +71,15 @@ In the expense list and in a project's expenses tab, click the «تاریخ» co
 
 ## Remember login
 The login screen has «ذخیره نام کاربری و رمز عبور». Tick it and log in: the username and password are saved on this PC (encrypted with the Windows user account via `flutter_secure_storage`, not plain text) and pre-fill the form next time (no auto-login, so logging out and switching user still works). A wrong password is never saved; unticking the box and logging in forgets the saved login. If the password is changed later, the old saved one fails once — log in with the new one to update it. `path_provider_android` is pinned below 2.3 in `pubspec.yaml` so the `jni` Java bridge (needs a JDK on Windows) is not pulled in.
+
+## In-app update («به‌روزرسانی برنامه»)
+Instead of replacing the program folder by hand, each PC can update itself from a folder on the server.
+
+**Publishing a new version (once, by whoever builds it)**
+1. Take the build zip from GitHub Actions («Build Windows» → Artifacts) and unzip it.
+2. Copy ALL its contents (`budget_management.exe`, `data\`, the DLLs and `version.txt`) into the update folder on the server: `\\dfs\Moasese Samavat\مدیریت فنی و مهندسی\Cost\App_Update` (`AppConfig.defaultUpdateFolder`; a different folder can be named on the first line of `Cost\update_path.txt`). Replace what is there.
+3. Optional: put a short description of the changes in `notes.txt` in that folder (UTF-8); users see it before updating.
+
+**Updating a PC**: open the app, click «به‌روزرسانی برنامه» in the side menu (an orange dot appears by itself when a newer version is waiting), then «دریافت و نصب». The app copies the new files to a temp folder, closes, a small PowerShell helper backs up the program folder, copies the new files over it (undoing everything if the copy fails) and starts the app again; the next start says whether it worked. Your data (`Desktop\project_manage`) is never touched.
+
+How "newer" is decided: `version.txt` (the CI build number, written into every build) in the update folder vs. the one next to the exe. Builds made before this feature have no `version.txt` and count as 0, so the first updater-enabled build has to be installed by hand once. The program folder must be writable by the user (not `C:\Program Files`). The helper log is `%TEMP%\budget_management_update.log`.

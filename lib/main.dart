@@ -9,6 +9,8 @@ import 'screens/home_shell.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
 import 'services/credential_store.dart';
+import 'services/update_service.dart';
+import 'services/update_status.dart';
 import 'services/database_service.dart';
 import 'services/db_status.dart';
 
@@ -31,6 +33,9 @@ Future<void> main() async {
     MultiProvider(
       providers: [
         Provider<CredentialStore>.value(value: const SecureCredentialStore()),
+        Provider<UpdateService>(create: (_) => UpdateService()),
+        ChangeNotifierProvider<UpdateStatus>(
+            create: (c) => UpdateStatus(c.read<UpdateService>())),
         ChangeNotifierProvider<DbStatus>(create: (_) => DbStatus(db)),
         ChangeNotifierProvider<AuthService>.value(value: auth),
         ChangeNotifierProvider<AppState>(create: (_) => AppState(db, auth)),

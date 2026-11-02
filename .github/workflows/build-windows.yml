@@ -22,7 +22,18 @@ jobs:
 
       - run: flutter pub get
 
+      # Runs the whole suite on Windows, including the in-app updater's real
+      # PowerShell helper. Failures show up as annotations on this job.
+      - name: Tests (Windows)
+        continue-on-error: true
+        run: flutter test --reporter github
+
       - run: flutter build windows --release
+
+      # The in-app updater compares this number with the one in the update folder.
+      - name: Stamp build number
+        shell: pwsh
+        run: Set-Content -Path build\windows\x64\runner\Release\version.txt -Value "${{ github.run_number }}" -Encoding ascii -NoNewline
 
       - name: Zip portable bundle
         shell: pwsh
